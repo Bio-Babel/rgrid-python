@@ -584,15 +584,18 @@ def _render_grob(
         if image is None:
             image = getattr(grob, "image", None)
         if image is not None:
-            # Apply justification (same as rect_grob)
             hj, vj = _resolve_just(grob)
             raw_x = renderer.resolve_x(getattr(grob, "x", 0.0), gp=gp)
             raw_y = renderer.resolve_y(getattr(grob, "y", 0.0), gp=gp)
             raw_w = renderer.resolve_w(getattr(grob, "width", 1.0), gp=gp)
             raw_h = renderer.resolve_h(getattr(grob, "height", 1.0), gp=gp)
-            # Compute bottom-left corner from anchor + justification
+            # `renderer.draw_raster` expects the *top-left* corner in y-down
+            # device pixels. `resolve_y` already returns y-down coords, so the
+            # y component of justification must be flipped relative to R's
+            # `justifyY(y, h, vjust) = y - h*vjust` (which assumes y-up NPC).
+            # Same correction `draw_rect` applies (renderer.py:815).
             x0 = raw_x - raw_w * hj
-            y0 = raw_y - raw_h * vj
+            y0 = raw_y - raw_h * (1.0 - vj)
             renderer.draw_raster(
                 image=image,
                 x=x0,
