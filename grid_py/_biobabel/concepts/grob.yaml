@@ -1,0 +1,34 @@
+id: grid_py.Grob
+name: Grob (Graphical Object)
+category: scene-graph
+description: |
+  A renderable description of a visual element — a rectangle, text, polygon,
+  line — that is *built* by a factory (`rect_grob`, `text_grob`, ...) and
+  *drawn* by `grid_draw`. Grobs are inert data; constructing one has no side
+  effect on the device. This is the central difference from immediate-mode
+  helpers like `grid_rect()` (which both builds and draws).
+
+  A `GTree` is a Grob whose payload is a list of child grobs (`grob_tree(*grobs)`).
+  Trees compose: you can put a tree inside another tree.
+invariants:
+  - "Constructing a grob does not draw anything; it returns a value."
+  - "Each grid_draw(grob) on a leaf grob results in (roughly) one device draw call."
+  - "Drawing a GTree results in one batched draw — the optimization."
+  - "Grobs are immutable in the user-facing API; edit by creating a new grob (or via `edit_grob`)."
+mental_model:
+  for_r_users: |
+    Same as R: `rectGrob()`, `textGrob()`, `gTree()`. The naming convention
+    drops the camelCase and dots — R `rectGrob()` → Python `rect_grob()`,
+    R `grid.rect()` → Python `grid_rect()`.
+  for_python_users: |
+    Think of a Grob as a frozen dataclass describing "what to draw," not "draw
+    this now." `rect_grob(...)` is the constructor; `grid_draw(g)` is what
+    actually touches the canvas. This separation is what enables you to
+    assemble a `grob_tree(...)` first and pay for rendering exactly once.
+  general: |
+    The whole "build a tree, draw the tree" idiom (the build-then-draw pattern)
+    is *only* available because grobs and drawing are decoupled.
+related_concepts:
+  - grid_py.Viewport
+  - grid_py.Gpar
+  - grid_py.Unit

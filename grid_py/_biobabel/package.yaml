@@ -1,0 +1,67 @@
+schema_version: 2
+
+repo: https://github.com/Bio-Babel/rgrid-python
+distribution: rgrid-python
+import_name: grid_py
+display_name: "grid_py (rgrid-python) — R grid graphics port"
+contract_class: grammar
+tier: 1
+type: build-on
+maturity: beta
+
+r_package:
+  package: grid
+  repo: R-base
+  version_or_commit: "4.5.3"
+  fidelity: full
+
+capabilities:
+  - viewport-stack
+  - grob-tree
+  - units-and-coordinates
+  - layered-rendering
+  - low-level-graphics
+
+domain_tags:
+  - visualization
+  - low-level-graphics
+
+task_tags:
+  - new-plotting-package
+  - sub-region-drawing
+  - multi-panel-layout
+  - custom-axes
+  - coordinate-transforms
+
+foundation: []
+
+triggers:
+  - intent: "build a plotting package on top of grid"
+    confidence: 0.95
+  - intent: "draw in a specific sub-region of the device"
+    confidence: 0.9
+  - intent: "use Unit, Viewport, grob, gpar"
+    confidence: 0.9
+  - intent: "port an R grid-based package to Python"
+    confidence: 0.9
+
+not_when:
+  - "user just wants a one-line plot (use ggplot2_py or matplotlib instead)"
+  - "user only needs a heatmap (use pheatmap or ComplexHeatmap)"
+
+recipes:
+  - id: grid_py.basic_subplot
+    task_tags: [sub-region-drawing]
+    path: recipes/basic_subplot.py
+    description: "Draw a rectangle and a text label inside a centered sub-viewport."
+    expected_artifacts: ["basic_subplot.png"]
+  - id: grid_py.scatter_with_thresholds
+    task_tags: [custom-axes]
+    path: recipes/scatter_with_thresholds.py
+    description: "Scatter plot with manual axes and threshold lines via grid primitives."
+    expected_artifacts: ["scatter_with_thresholds.png"]
+  - id: grid_py.multi_panel_layout
+    task_tags: [multi-panel-layout]
+    path: recipes/multi_panel_layout.py
+    description: "GridLayout-based 2×2 multi-panel figure."
+    expected_artifacts: ["multi_panel.png"]

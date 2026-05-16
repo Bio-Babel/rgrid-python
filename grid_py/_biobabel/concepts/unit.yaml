@@ -1,0 +1,34 @@
+id: grid_py.Unit
+name: Unit
+category: coordinates
+description: |
+  A value (or vector of values) tagged with a unit kind that determines how it
+  is resolved at draw-time. The most common unit kinds are:
+
+    - `"npc"`  — Normalized Parent Coordinates. 0 is the left/bottom of the
+                  current viewport; 1 is the right/top.
+    - `"native"` — values in the viewport's data scale (set via the viewport's
+                   xscale / yscale).
+    - `"cm"`, `"mm"`, `"inches"`, `"points"` — physical units.
+    - `"lines"`, `"char"` — font-relative.
+    - `"strwidth"`, `"strheight"` — relative to the size of a given string.
+
+  Constructed with `Unit(value, units)` — there is no lowercase `unit()`
+  factory in grid_py (this is the only API gap vs R grid).
+invariants:
+  - "Unit is what `npc`/`native`/`cm`/... resolution depends on; pure numbers do NOT carry that info."
+  - "`Unit(0.5, 'npc')` is relative to the current viewport, not absolute."
+  - "Use `native` (not `npc`) when expressing data coordinates inside a `data_viewport()`."
+  - "Vectors recycle: `Unit([1, 2, 3], 'cm')` is fine; `Unit(1, ['cm', 'in'])` recycles units."
+mental_model:
+  for_r_users: |
+    Identical to R's `unit()`. The only difference is calling Python's `Unit(...)`
+    (class constructor) instead of R's `unit(...)` (function).
+  for_python_users: |
+    A typed scalar/vector — like NumPy's units packages or pint. Without
+    constructing a Unit you cannot specify "0.5 in npc"; passing `0.5` to a
+    grob factory will sometimes work (treated as `"npc"`) and sometimes fail.
+    Be explicit.
+related_concepts:
+  - grid_py.Viewport
+  - grid_py.Gpar

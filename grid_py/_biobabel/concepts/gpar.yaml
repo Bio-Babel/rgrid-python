@@ -1,0 +1,24 @@
+id: grid_py.Gpar
+name: Gpar (Graphical Parameters)
+category: rendering-context
+description: |
+  A bag of graphical parameters: stroke color (`col`), fill color (`fill`),
+  line width (`lwd`), line type (`lty`), font family/size, alpha, and more.
+  Set on a viewport, it applies to everything drawn beneath; set on a grob,
+  it applies to that grob only and overrides ancestors.
+
+  Construct with `gpar(col="red", fill="lightblue", lwd=2)`.
+invariants:
+  - "Gpars on viewports are merged; child viewport gpar overrides parent."
+  - "Gpar on a grob overrides any inherited from the current viewport."
+  - "Unset gpar fields are not inherited from device defaults; they're sentinel-empty."
+mental_model:
+  for_r_users: |
+    Identical to R's `gpar()`. Same field names, same semantics.
+  for_python_users: |
+    Think of it as a CSS-like cascade: viewports are scopes, grobs can shadow
+    fields. Unlike CSS, *unset* fields are not inherited from the device — they
+    fall through to grid_py's hard-coded defaults.
+related_concepts:
+  - grid_py.Viewport
+  - grid_py.Grob

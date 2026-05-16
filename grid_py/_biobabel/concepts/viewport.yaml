@@ -1,0 +1,31 @@
+id: grid_py.Viewport
+name: Viewport
+category: drawing-context
+description: |
+  A rectangular region on the graphics device with its own coordinate system.
+  Viewports nest into a stack/tree. The "current" viewport (top of the stack)
+  determines how every `Unit("npc", ...)` value is resolved and what the
+  rendering target rectangle is. Pushing a child viewport saves the current
+  graphical context; popping restores it.
+invariants:
+  - "push_viewport and pop_viewport must balance over a draw session."
+  - "Unit(0.5, 'npc') means 'half of the *current* viewport's width/height', not the device's."
+  - "Child viewport coordinates are expressed relative to the parent."
+  - "gpar() set on a viewport is merged into the gpar of grobs drawn beneath it."
+mental_model:
+  for_r_users: |
+    Same semantics as R `grid::viewport`. `pushViewport()` → `push_viewport()`,
+    `popViewport()` → `pop_viewport()`, `downViewport()` → `down_viewport()`.
+  for_python_users: |
+    Think of it as a context manager for a stack-based coordinate transform.
+    Each `Viewport(x, y, width, height)` defines a clip+translate+scale that
+    gets pushed onto a stack; everything drawn while it is on top is mapped
+    into that rectangle.
+  general: |
+    The viewport stack is the *only* mechanism for sub-region drawing in grid_py;
+    there is no implicit "axis transform" — you compose coordinate systems by
+    nesting viewports.
+related_concepts:
+  - grid_py.Unit
+  - grid_py.Gpar
+  - grid_py.GridLayout
