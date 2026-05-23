@@ -106,7 +106,9 @@ class TestGparValidation:
         assert gp.get("lty") == "44"
 
     def test_lty_invalid_string(self):
-        with pytest.raises(ValueError, match="invalid line type"):
+        # Post-B7: validation is delegated to grid_py._lty.resolve_lty
+        # which raises ``Invalid lty: 'zigzag' (invalid hex digit)``.
+        with pytest.raises(ValueError, match=r"Invalid lty"):
             Gpar(lty="zigzag")
 
     def test_lty_numeric(self):

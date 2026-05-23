@@ -28,6 +28,7 @@ except ImportError:
 
 from ._colour import parse_r_colour as _parse_colour
 from ._gpar import Gpar
+from ._lty import is_blank_lty, resolve_lty
 from ._patterns import LinearGradient, RadialGradient, Pattern
 from ._renderer_base import GridRenderer
 
@@ -41,28 +42,12 @@ __all__ = ["CairoRenderer"]
 # Line-type mapping
 # ---------------------------------------------------------------------------
 
-_LTY_DASHES: Dict[str, Optional[Sequence[float]]] = {
-    "solid": None,
-    "dashed": [6.0, 4.0],
-    "dotted": [2.0, 2.0],
-    "dotdash": [2.0, 2.0, 6.0, 2.0],
-    "longdash": [10.0, 3.0],
-    "twodash": [5.0, 2.0, 10.0, 2.0],
-    "blank": [0.0, 100.0],
-}
-
-# R allows ``lty`` to be an integer 0..6 (par docs): 0=blank, 1=solid,
-# 2=dashed, 3=dotted, 4=dotdash, 5=longdash, 6=twodash.  Map to the
-# named equivalents so downstream dash lookup works for both forms.
-_LTY_INT_TO_NAME: Dict[int, str] = {
-    0: "blank",
-    1: "solid",
-    2: "dashed",
-    3: "dotted",
-    4: "dotdash",
-    5: "longdash",
-    6: "twodash",
-}
+# Linetype dash arrays come from grid_py._lty.resolve_lty (single source
+# of truth, shared with the Web renderer).  The legacy ``_LTY_DASHES``
+# table and ``_LTY_INT_TO_NAME`` dict used to live here; they have been
+# removed because their dash values were not R-faithful (e.g. "dashed"
+# resolved to [6, 4] instead of R's [4, 4]) and they offered no path for
+# hex-string lty.  See grid_py/_lty.py for the R-verified replacement.
 
 _LINEEND_MAP = {
     "round": cairo.LINE_CAP_ROUND,
@@ -445,23 +430,27 @@ class CairoRenderer(GridRenderer):
         # R semantics: lwd=0 means invisible line
         if lw <= 0:
             return (0.0, 0.0, 0.0, 0.0)
-        ctx.set_line_width(self._lwd_to_user(lw))
+        # lwd is supplied in R points; convert to user-space units once
+        # so set_line_width AND the dash array (below) share coordinates.
+        lw_user = self._lwd_to_user(lw)
+        ctx.set_line_width(lw_user)
 
+        # lty handling — single source of truth in grid_py/_lty.py.
+        # Short-circuit pattern is symmetric with the col=NA and lwd<=0
+        # branches above: ``Gpar(lty=NA)`` / ``Gpar(lty=0)`` skip the
+        # stroke entirely (R par convention).
         lty = gp.get("lty", None)
-        if lty is not None:
-            raw = lty[0] if isinstance(lty, (list, tuple)) else lty
-            # R integer code (0..6) → name
-            if isinstance(raw, (int, float, np.integer, np.floating)) and \
-               not isinstance(raw, bool):
-                raw = _LTY_INT_TO_NAME.get(int(raw), str(raw))
-            lty_val = str(raw)
-            dashes = _LTY_DASHES.get(lty_val)
-            if dashes is not None:
-                ctx.set_dash(dashes)
-            else:
-                ctx.set_dash([])
-        else:
+        if is_blank_lty(lty):
+            return (0.0, 0.0, 0.0, 0.0)
+        if lty is None:
             ctx.set_dash([])
+        else:
+            # lwd lives in *user space* after ``_lwd_to_user`` (see
+            # commit ef7aee5 for the historical CTM regression that
+            # established this).  resolve_lty must receive the same
+            # space so set_dash and set_line_width share coordinates.
+            dashes = resolve_lty(lty, lwd=lw_user)
+            ctx.set_dash(dashes if dashes else [])
 
         lineend = gp.get("lineend", None)
         if lineend is not None:

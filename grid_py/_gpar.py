@@ -20,14 +20,12 @@ __all__ = ["Gpar", "gpar", "get_gpar"]
 # Constants
 # ---------------------------------------------------------------------------
 
-_VALID_LTY: set[str] = {
-    "solid",
-    "dashed",
-    "dotted",
-    "dotdash",
-    "longdash",
-    "twodash",
-}
+# Derived from grid_py._lty so there is exactly one source of truth for
+# the named-lty set.  ``"blank"`` is added because R par/grid accepts it
+# even though it has no hex equivalent (it short-circuits the stroke).
+from ._lty import valid_named_lty as _valid_named_lty
+
+_VALID_LTY: frozenset[str] = _valid_named_lty()
 
 _VALID_LINEEND: set[str] = {"round", "butt", "square"}
 
@@ -77,9 +75,12 @@ def _as_list(value: Any) -> list:
     return [value]
 
 
-def _is_hex_lty(s: str) -> bool:
-    """Return True when *s* looks like a valid hex-string line-type spec."""
-    return all(c in "0123456789abcdefABCDEF" for c in s) and len(s) > 0
+# NOTE: ``_is_hex_lty`` used to live here.  It has been removed because
+# hex-string validity is now decided by ``grid_py._lty.resolve_lty``,
+# which is the single source of truth for both "is this lty valid?" and
+# "what dash array does it expand to?".  Keeping a separate validator
+# here would create the same kind of dual-source landmine that
+# motivated B7 in the first place.
 
 
 def _resolve_fontface(value: Any) -> int:
@@ -254,14 +255,19 @@ class Gpar:
                     ) from exc
 
             elif name == "lty":
+                # Validation delegates to grid_py._lty so accept/reject
+                # decisions match the renderer-time resolver exactly.
+                # ``resolve_lty`` raises ValueError on bad input with a
+                # message already containing the offending value, so we
+                # let it propagate (no try/except — principle 4).
+                from ._lty import is_blank_lty, resolve_lty
                 for v in vals:
-                    if isinstance(v, str):
-                        if v not in _VALID_LTY and not _is_hex_lty(v):
-                            raise ValueError(
-                                f"invalid line type '{v}'; must be one of "
-                                f"{sorted(_VALID_LTY)} or a hex string"
-                            )
-                    elif not isinstance(v, (int, float, np.integer, np.floating)):
+                    if is_blank_lty(v):
+                        continue
+                    if isinstance(v, (str, int, float, np.integer, np.floating)) \
+                       and not isinstance(v, bool):
+                        resolve_lty(v)   # raises ValueError if invalid
+                    else:
                         raise TypeError(
                             f"'lty' must be str or numeric, got {type(v).__name__}"
                         )

@@ -24,13 +24,24 @@ var gridpy = (function () {
 
     function applyGparSvg(sel, gpar) {
         if (!gpar) return;
+        // skip_stroke is set by the Python serializer for blank lty
+        // (R LTY_BLANK) — mirrors col=NA short-circuit.
+        if (gpar.skip_stroke) {
+            sel.attr("stroke", "none");
+            return;
+        }
         var fill = parseColour(gpar.fill);
         var col = parseColour(gpar.col);
         if (fill !== undefined) sel.attr("fill", fill || "none");
         if (col !== undefined) sel.attr("stroke", col || "none");
         if (gpar.lwd !== undefined) sel.attr("stroke-width", gpar.lwd);
         if (gpar.alpha !== undefined) sel.attr("opacity", gpar.alpha);
-        if (gpar.lty) sel.attr("stroke-dasharray", ltyToDash(gpar.lty));
+        // gpar.dash is the R-faithful dash array pre-resolved by
+        // grid_py._lty.resolve_lty (single source of truth shared with
+        // the Cairo backend).  No JS-side lty knowledge needed.
+        if (gpar.dash && gpar.dash.length > 0) {
+            sel.attr("stroke-dasharray", gpar.dash.join(","));
+        }
         if (gpar.lineend) sel.attr("stroke-linecap", gpar.lineend);
         if (gpar.linejoin) sel.attr("stroke-linejoin",
             gpar.linejoin === "mitre" ? "miter" : gpar.linejoin);
@@ -55,6 +66,12 @@ var gridpy = (function () {
 
     function applyGparCanvas(ctx, gpar) {
         if (!gpar) return;
+        if (gpar.skip_stroke) {
+            // R LTY_BLANK — short-circuit by zeroing stroke alpha.
+            ctx.strokeStyle = "rgba(0,0,0,0)";
+            ctx.setLineDash([]);
+            return;
+        }
         var fill = parseColour(gpar.fill);
         var col = parseColour(gpar.col);
         ctx.fillStyle = fill || "rgba(0,0,0,0)";
@@ -64,30 +81,10 @@ var gridpy = (function () {
         if (gpar.lineend) ctx.lineCap = gpar.lineend;
         if (gpar.linejoin) ctx.lineJoin =
             gpar.linejoin === "mitre" ? "miter" : (gpar.linejoin || "round");
-        if (gpar.lty) {
-            var dash = ltyToDashArray(gpar.lty);
-            ctx.setLineDash(dash || []);
-        } else {
-            ctx.setLineDash([]);
-        }
-    }
-
-    function ltyToDash(lty) {
-        var map = {
-            "dashed": "6,4", "dotted": "2,2",
-            "dotdash": "2,2,6,2", "longdash": "10,3",
-            "twodash": "5,2,10,2", "blank": "0,100"
-        };
-        return map[lty] || null;
-    }
-
-    function ltyToDashArray(lty) {
-        var map = {
-            "dashed": [6, 4], "dotted": [2, 2],
-            "dotdash": [2, 2, 6, 2], "longdash": [10, 3],
-            "twodash": [5, 2, 10, 2], "blank": [0, 100]
-        };
-        return map[lty] || [];
+        // gpar.dash is the pre-resolved cairo-style dash array from the
+        // Python side (grid_py._lty.resolve_lty).  See applyGparSvg for
+        // the rationale.
+        ctx.setLineDash(gpar.dash || []);
     }
 
     function hjustToAnchor(hj) {

@@ -17,6 +17,7 @@ import numpy as np
 
 from ._font_metrics import get_font_backend, FontMetricsBackend
 from ._gpar import Gpar
+from ._lty import is_blank_lty, resolve_lty
 from ._patterns import LinearGradient, RadialGradient, Pattern
 from ._renderer_base import GridRenderer
 from ._scene_graph import (
@@ -38,11 +39,20 @@ from ._colour import colour_to_css as _parse_colour_str
 
 
 def _serialise_gpar(gp: Optional[Gpar], defs: DefsCollection, id_gen: _IdGenerator) -> dict:
-    """Convert Gpar to a JSON-safe dict.  Gradient/pattern fills become def refs."""
+    """Convert Gpar to a JSON-safe dict.  Gradient/pattern fills become def refs.
+
+    Linetype handling: ``gpar.lty`` is *not* transmitted to JS as a string.
+    Instead we pre-resolve it to a numeric dash array via
+    :func:`grid_py._lty.resolve_lty` (R-faithful) and emit it as
+    ``result["dash"]``.  ``Gpar(lty=NA)`` (blank) becomes
+    ``result["skip_stroke"] = True``.  This collapses all R lty knowledge
+    into one Python module — the JS side just paints whatever array it
+    receives.
+    """
     if gp is None:
         return {}
     result: Dict[str, Any] = {}
-    for key in ("col", "fill", "lwd", "lty", "lineend", "linejoin",
+    for key in ("col", "fill", "lwd", "lineend", "linejoin",
                 "fontsize", "fontfamily", "fontface", "alpha"):
         val = gp.get(key, None)
         if val is None:
@@ -80,6 +90,25 @@ def _serialise_gpar(gp: Optional[Gpar], defs: DefsCollection, id_gen: _IdGenerat
             result[key] = float(val)
         else:
             result[key] = str(val) if not isinstance(val, (int, float)) else val
+
+    # ---- lty -> dash array (single source of truth via _lty.resolve_lty) ----
+    # Web backend lwd convention: raw R points (matches the unconverted
+    # ``result["lwd"] = float(...)`` we just emitted, which is what JS
+    # passes verbatim to SVG `stroke-width`).  SVG `stroke-dasharray`
+    # does *not* auto-scale with stroke-width, so the resolver pre-multiplies
+    # ``nibble × lwd`` here; the two end up in the same coordinate space.
+    lty_in = gp.get("lty", None)
+    if lty_in is not None and (not isinstance(lty_in, (list, tuple, np.ndarray)) or len(lty_in) > 0):
+        if is_blank_lty(lty_in):
+            result["skip_stroke"] = True
+        else:
+            lwd_raw_in = gp.get("lwd", None)
+            if isinstance(lwd_raw_in, (list, tuple, np.ndarray)) and len(lwd_raw_in):
+                lwd_raw_in = lwd_raw_in[0]
+            lwd_raw = float(lwd_raw_in) if lwd_raw_in is not None else 1.0
+            dash = resolve_lty(lty_in, lwd=lwd_raw)
+            if dash is not None:
+                result["dash"] = dash
     return result
 
 
