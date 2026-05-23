@@ -215,7 +215,12 @@ def _draw_arrow_heads(
     try:
         l_w = float(renderer.resolve_w(length_unit, gp=gp))
         l_h = float(renderer.resolve_h(length_unit, gp=gp))
-    except Exception:
+    except (ValueError, AttributeError, TypeError) as exc:
+        warnings.warn(
+            f"arrow length cannot be resolved ({exc}); arrow head skipped",
+            UserWarning,
+            stacklevel=2,
+        )
         return
     length_dev = min(l_w, l_h)
     if not (length_dev > 0):

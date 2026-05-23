@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import math
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -181,6 +182,33 @@ class CairoRenderer(GridRenderer):
         self._ctx.rectangle(x0, y0, w, h)
         self._ctx.clip()
 
+    def _apply_clip_grob(self, grob, vtr):
+        """Apply a grob-based clip path (R 4.1+ ``viewport(clip=grob)``).
+
+        Re-uses the existing ``_path_collecting`` mode (originally for
+        R 4.2+ ``fillStroke`` grobs): primitives drop their stroke /
+        fill calls but still emit Cairo path commands. After the
+        grob's geometry is in the current path we call ``ctx.clip()``;
+        the matching ``ctx.save()`` here pairs with the standard
+        ``_restore_clip`` (``ctx.restore()``) on viewport pop, so
+        non-rect clips share the same pop machinery as rect clips.
+        """
+        ctx = self._ctx
+        ctx.save()
+        # Mirrors begin_path_collect but inline because we manage
+        # save/restore ourselves above.
+        ctx.new_path()
+        prior_mode = self._path_collecting
+        self._path_collecting = True
+        try:
+            # Use the standard draw pipeline so per-primitive coord /
+            # unit / gp handling stays in one place.
+            from ._draw import grid_draw
+            grid_draw(grob, recording=False)
+        finally:
+            self._path_collecting = prior_mode
+        ctx.clip()
+
     def _restore_clip(self) -> None:
         self._ctx.restore()
 
@@ -296,7 +324,14 @@ class CairoRenderer(GridRenderer):
                 grid_draw(mask_grob, recording=False)
             finally:
                 state._renderer = orig_renderer
-        except Exception:
+        except Exception as exc:
+            # Mask grob is user code — any exception is possible. Surface
+            # it as a warning so the user knows their mask didn't render,
+            # but don't crash the whole plot.
+            warnings.warn(
+                f"mask grob render failed; mask skipped: {exc}",
+                UserWarning, stacklevel=2,
+            )
             return None
 
         return mask_surface
@@ -358,7 +393,11 @@ class CairoRenderer(GridRenderer):
         try:
             ux, uy = self._ctx.device_to_user_distance(lw_dev, lw_dev)
             return max(abs(ux), abs(uy))
-        except Exception:
+        except cairo.Error:
+            # Cairo can refuse the conversion when the user-space matrix
+            # is singular (e.g. zero-area viewport). Fall back to the
+            # device value — this is graceful degradation, not a bug
+            # to surface.
             return lw_dev
 
     def _apply_stroke(self, gp: Optional[Gpar]) -> Tuple[float, float, float, float]:
@@ -685,8 +724,14 @@ class CairoRenderer(GridRenderer):
                 grid_draw(pat.grob, recording=False)
             finally:
                 state._renderer = orig_renderer
-        except Exception:
-            # If grob rendering fails, return transparent
+        except Exception as exc:
+            # Tiling-pattern grob is user code — surface failures so the
+            # user knows their pattern fell back to transparent.
+            warnings.warn(
+                f"tiling pattern grob render failed; "
+                f"falling back to transparent: {exc}",
+                UserWarning, stacklevel=2,
+            )
             return (0.0, 0.0, 0.0, 0.0)
 
         tile_surface = tile_renderer._surface
@@ -1742,7 +1787,11 @@ class CairoRenderer(GridRenderer):
             result = ctx.pop_group()
             return result
 
-        except Exception:
+        except cairo.Error as exc:
+            warnings.warn(
+                f"group composition failed (cairo): {exc}",
+                UserWarning, stacklevel=2,
+            )
             return None
 
     def use_group(self, ref: Any, transform: Any = None) -> None:

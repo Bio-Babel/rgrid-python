@@ -18,6 +18,7 @@ Coordinate pipeline (matches R's grid/src/unit.c + viewport.c):
 from __future__ import annotations
 
 import math
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -369,7 +370,24 @@ class GridRenderer(ABC):
         return self.text_extents(text, gp=gp)
 
     def _do_apply_clip_vtr(self, vp: Any, vtr: ViewportTransformResult) -> None:
-        """Apply clipping for a viewport using its transform."""
+        """Apply clipping for a viewport using its transform.
+
+        Dispatches on the viewport's ``_clip`` value:
+
+        * ``True`` / ``"on"`` → rectangular clip to viewport bounds
+          (the long-standing default; ``_apply_clip_rect``)
+        * :class:`GridClipPath` → arbitrary clip path against the grob
+          stored in the GridClipPath (R 4.1+; ``_apply_clip_grob``)
+        * Anything else → no clip (push ``False`` so ``pop`` knows not
+          to restore)
+
+        ``_clip_stack`` stores the clip kind so ``pop_viewport`` can
+        decide whether to call ``_restore_clip`` (which undoes both
+        rect and path clips uniformly via the backend's save/restore
+        pair).
+        """
+        from ._clippath import GridClipPath
+
         clip = getattr(vp, "_clip", None)
         if clip is True or clip == "on":
             # Compute clip rect in device coords from the viewport bounds
@@ -384,6 +402,13 @@ class GridRenderer(ABC):
             y0_device = self._device_height - y0_bottom - ph
             self._apply_clip_rect(x0, y0_device, pw, ph)
             self._clip_stack.append(True)
+        elif isinstance(clip, GridClipPath):
+            # R viewport.R:86-96 — grob/path clip is honoured by
+            # rendering the grob's geometry into the renderer's
+            # current path then applying ``cairo_clip`` (or the web
+            # backend equivalent). Backend-specific.
+            self._apply_clip_grob(clip._grob, vtr)
+            self._clip_stack.append(clip)
         else:
             self._clip_stack.append(False)
 
@@ -538,7 +563,10 @@ class GridRenderer(ABC):
         try:
             from ._state import get_state
             return get_state()._scale
-        except Exception:
+        except (ImportError, AttributeError):
+            # Init-order edge: state module may not be importable during
+            # very early renderer construction. 1.0 is the documented
+            # default (R grid GSS_SCALE).
             return 1.0
 
     # ===================================================================== #
@@ -728,7 +756,16 @@ class GridRenderer(ABC):
             if grob.vp is not None:
                 _pop_grob_vp(grob.vp)
 
-        except Exception:
+        except (ValueError, AttributeError, TypeError, IndexError) as exc:
+            # Evaluating a grob unit (grobWidth/Height/Ascent/Descent of
+            # a user grob) requires the grob to have valid coords + a
+            # measurable ``*Details`` method. Bad inputs surface here as
+            # a warning rather than silently returning 0 (which would
+            # collapse the grob into a degenerate point).
+            warnings.warn(
+                f"grob unit evaluation failed; falling back to 0 inches: {exc}",
+                UserWarning, stacklevel=2,
+            )
             result = 0.0
         finally:
             # --- Restore state (R unit.c:561-562) ---
@@ -770,18 +807,35 @@ class GridRenderer(ABC):
             y_unit = Unit(0.5, "npc")
         try:
             x_inches = self._resolve_to_inches(x_unit, "x", False, gp)
-        except Exception:
+        except (ValueError, AttributeError, TypeError, IndexError) as exc:
+            warnings.warn(
+                f"grob x-coord could not be resolved; "
+                f"defaulting anchor to x=0 inches: {exc}",
+                UserWarning, stacklevel=2,
+            )
             x_inches = 0.0
         try:
             y_inches = self._resolve_to_inches(y_unit, "y", False, gp)
-        except Exception:
+        except (ValueError, AttributeError, TypeError, IndexError) as exc:
+            warnings.warn(
+                f"grob y-coord could not be resolved; "
+                f"defaulting anchor to y=0 inches: {exc}",
+                UserWarning, stacklevel=2,
+            )
             y_inches = 0.0
 
         # Width / height of the grob's bounding box, in inches.
         def _details_inches(fn, axis: str) -> float:
             try:
                 u = fn(grob)
-            except Exception:
+            except (ValueError, AttributeError, TypeError) as exc:
+                # User grob's ``width_details`` / ``height_details`` raised;
+                # surface so the user knows their grob is mis-implementing
+                # the size protocol.
+                warnings.warn(
+                    f"grob {fn.__name__} failed; using 0 inches: {exc}",
+                    UserWarning, stacklevel=2,
+                )
                 return 0.0
             if u is None:
                 return 0.0
@@ -791,7 +845,12 @@ class GridRenderer(ABC):
                 return 0.0
             try:
                 return float(self._resolve_to_inches(u, axis, True, gp))
-            except Exception:
+            except (ValueError, AttributeError, TypeError, IndexError) as exc:
+                warnings.warn(
+                    f"grob {axis}-dim unit could not be resolved; "
+                    f"using 0 inches: {exc}",
+                    UserWarning, stacklevel=2,
+                )
                 return 0.0
 
         w_in = _details_inches(width_details, "x")
@@ -1165,6 +1224,32 @@ class GridRenderer(ABC):
     @abstractmethod
     def _restore_clip(self) -> None:
         ...
+
+    def _apply_clip_grob(self, grob: Any, vtr: ViewportTransformResult) -> None:
+        """Apply a grob-based clip path (R 4.1+ ``viewport(clip = grob)``).
+
+        Default implementation raises ``NotImplementedError`` — backends
+        that support arbitrary clip paths should override.  The standard
+        Cairo backend uses its existing ``_path_collecting`` mode to
+        render the grob's geometry into the current path then calls
+        ``ctx.clip()``; ``_restore_clip`` (paired with the implicit
+        ``ctx.save()`` here) reverts.
+
+        Parameters
+        ----------
+        grob : Grob
+            The grob whose geometry defines the clip path. Typically a
+            primitive (rect/circle/polygon/path); ``gTree`` is unioned.
+        vtr : ViewportTransformResult
+            The current viewport transform; backends that need to
+            push a temporary viewport before rendering the clip grob
+            should use this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support grob/GridClipPath "
+            "viewport clips. Use clip='on' / 'off' / 'inherit', or a "
+            "renderer backend that implements ``_apply_clip_grob``."
+        )
 
     # ===================================================================== #
     # Abstract methods: graphics state save/restore                         #

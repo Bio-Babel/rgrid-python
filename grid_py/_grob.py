@@ -1157,12 +1157,15 @@ def _edit_this_grob(grob: Grob, specs: dict[str, Any]) -> Grob:
         if not key:
             continue
         if key == "gp":
-            # Special handling: merge gpar
+            # Special handling — R editGrob uses ``mod.gpar`` (gpar.R:298-304)
+            # which does a plain key overwrite (``gp[names(newgp)] <- newgp``)
+            # *without* the cumulative cex/alpha/lex multiplication that
+            # viewport-push's ``set.gpar`` applies. ``Gpar._mod`` is the
+            # mirror; ``Gpar._merge`` is the cumulative one.
             if value is None:
                 grob._gp = None
             elif grob._gp is not None:
-                # Merge new gp on top of existing
-                grob._gp = grob._gp.merge(value) if hasattr(grob._gp, "merge") else value
+                grob._gp = grob._gp._mod(value)
             else:
                 grob._gp = value
         elif key == "name":

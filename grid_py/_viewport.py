@@ -113,20 +113,29 @@ _CLIP_MAP = {
 def _valid_clip(clip: Any) -> Any:
     """Normalise *clip* to its internal representation.
 
+    R parity (viewport.R:86-97): ``viewport(clip = ...)`` accepts
+    string sentinels (``"on"``/``"off"``/``"inherit"``), booleans /
+    ``NA``, **and** a grob / ``GridPath`` / ``GridClipPath`` for
+    arbitrary clip-path masking (R 4.1+ feature). Grobs and GridPaths
+    are coerced to :class:`~grid_py.GridClipPath` exactly as R wraps
+    them via ``createClipPath(as.path(grob))``.
+
     Parameters
     ----------
-    clip : bool, str, or other
-        ``"on"`` -> ``True``, ``"off"`` -> ``None``, ``"inherit"`` -> ``False``.
-        Booleans and ``None`` pass through unchanged.
+    clip : bool, str, grob, GridPath, GridClipPath, or None
+        ``"on"`` → ``True``, ``"off"`` → ``None``, ``"inherit"`` →
+        ``False``. Booleans and ``None`` pass through unchanged. Grob /
+        GridPath / GridClipPath produce a :class:`GridClipPath` (the
+        renderer dispatches on this type at viewport-push time).
 
     Returns
     -------
-    bool or None
+    bool, None, or GridClipPath
 
     Raises
     ------
     ValueError
-        If *clip* is a string that is not one of the accepted values.
+        If *clip* is none of the accepted shapes.
     """
     if isinstance(clip, bool) or clip is None:
         return clip
@@ -135,13 +144,25 @@ def _valid_clip(clip: Any) -> Any:
         if val is None and clip.lower() != "off":
             raise ValueError(
                 f"invalid 'clip' value {clip!r}; "
-                "must be 'on', 'off', 'inherit', or a boolean"
+                "must be 'on', 'off', 'inherit', a boolean, or a grob / "
+                "GridPath / GridClipPath"
             )
         # "off" -> None is correct from the map
         return _CLIP_MAP.get(clip.lower(), None)
+    # R 4.1+: grob / GridPath / GridClipPath as clip
+    from ._clippath import GridClipPath, as_clip_path
+    if isinstance(clip, GridClipPath):
+        return clip
+    from ._path import GridPath
+    if isinstance(clip, GridPath):
+        return as_clip_path(clip)
+    from ._grob import Grob
+    if isinstance(clip, Grob):
+        return as_clip_path(clip)
     raise ValueError(
         f"invalid 'clip' value {clip!r}; "
-        "must be 'on', 'off', 'inherit', or a boolean"
+        "must be 'on', 'off', 'inherit', a boolean, or a grob / "
+        "GridPath / GridClipPath"
     )
 
 

@@ -914,8 +914,13 @@ def _resolve_linear_gradient(grad: LinearGradient) -> ResolvedPattern:
             "stops": grad.stops,
             "extend": grad.extend,
         }
-    except Exception:
-        # Fallback: store the original gradient for later resolution
+    except (ValueError, AttributeError, TypeError, IndexError):
+        # Documented deferred-resolution fallback: when the gradient's
+        # endpoint Units can't be resolved against the current
+        # renderer state (e.g. ``"npc"`` outside a viewport), stash the
+        # original gradient so the renderer can resolve it later. R's
+        # ``resolvePattern.GridLinearGradient`` (patterns.R:401-418)
+        # delegates the same way via lazy attr lookup.
         ref = {"type": "linear_gradient", "pattern": grad}
 
     return ResolvedPattern(grad, ref)
@@ -949,7 +954,8 @@ def _resolve_radial_gradient(grad: RadialGradient) -> ResolvedPattern:
             "stops": grad.stops,
             "extend": grad.extend,
         }
-    except Exception:
+    except (ValueError, AttributeError, TypeError, IndexError):
+        # Deferred-resolution fallback — see ``_resolve_linear_gradient``.
         ref = {"type": "radial_gradient", "pattern": grad}
 
     return ResolvedPattern(grad, ref)
@@ -974,7 +980,8 @@ def _resolve_tiling_pattern(pat: Pattern) -> ResolvedPattern:
             "width": float(wh["w"][0]), "height": float(wh["h"][0]),
             "extend": pat.extend,
         }
-    except Exception:
+    except (ValueError, AttributeError, TypeError, IndexError):
+        # Deferred-resolution fallback — see ``_resolve_linear_gradient``.
         ref = {"type": "tiling_pattern", "pattern": pat}
 
     return ResolvedPattern(pat, ref)

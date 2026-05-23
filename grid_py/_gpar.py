@@ -462,6 +462,26 @@ class Gpar:
         gp._params = merged
         return gp
 
+    # -- mod (R: mod.gpar) -------------------------------------------------
+
+    def _mod(self, new_gp: "Gpar") -> "Gpar":
+        """Edit-time merge (R ``mod.gpar`` — gpar.R:298-304).
+
+        Plain key overwrite — ``new_gp``'s keys replace ``self``'s keys,
+        unmentioned keys are kept unchanged. Unlike :meth:`_merge`
+        (which mirrors R ``set.gpar`` and multiplies cumulative
+        params like ``cex`` / ``alpha`` / ``lex``), this method is the
+        one used by ``editGrob`` and does NOT multiply — R's
+        ``mod.gpar`` does a single ``gp[names(newgp)] <- newgp``.
+        """
+        if not self._params:
+            return new_gp
+        merged = copy.deepcopy(self._params)
+        merged.update(copy.deepcopy(new_gp._params))
+        gp = object.__new__(Gpar)
+        gp._params = merged
+        return gp
+
     # -- display -----------------------------------------------------------
 
     def __repr__(self) -> str:

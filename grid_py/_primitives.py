@@ -20,6 +20,7 @@ rendering.  When ``draw=False`` the grob is simply returned.
 
 from __future__ import annotations
 
+import numpy as np
 from typing import (
     Any,
     Callable,
@@ -723,9 +724,13 @@ def points_grob(
     Parameters
     ----------
     x : Unit, numeric, or None
-        Horizontal coordinates.  When ``None`` a default is chosen.
+        Horizontal coordinates.  ``None`` mirrors R's
+        ``pointsGrob`` default of ``stats::runif(10)`` — 10 random
+        points drawn from ``np.random.uniform(0, 1, 10)``. The numpy
+        global RNG state controls reproducibility; seed via
+        ``np.random.seed(...)`` if you need deterministic output.
     y : Unit, numeric, or None
-        Vertical coordinates.  When ``None`` a default is chosen.
+        Vertical coordinates.  Same defaulting rule as *x*.
     size : Unit, numeric, or None
         Symbol size.  Defaults to ``Unit(1, "char")`` when ``None``.
     default_units : str
@@ -744,13 +749,21 @@ def points_grob(
     -------
     Grob
         A grob with ``_grid_class="points"``.
+
+    Notes
+    -----
+    R parity (primitives.R:1562-1563): ``pointsGrob`` defaults are
+    ``x = stats::runif(10), y = stats::runif(10)``. Every no-arg call
+    therefore produces a different scatter — this is a debug /
+    illustration default, not a deterministic API. Real usage should
+    pass explicit coordinates.
     """
     if x is None:
-        x = Unit(0.5, "npc")
+        x = Unit(np.random.uniform(0.0, 1.0, 10), default_units)
     else:
         x = _ensure_unit(x, default_units)
     if y is None:
-        y = Unit(0.5, "npc")
+        y = Unit(np.random.uniform(0.0, 1.0, 10), default_units)
     else:
         y = _ensure_unit(y, default_units)
     if size is None:
@@ -767,7 +780,7 @@ def grid_points(
     x: Any = None,
     y: Any = None,
     size: Optional[Any] = None,
-    default_units: str = "npc",
+    default_units: str = "native",
     pch: Union[int, str] = 1,
     name: Optional[str] = None,
     gp: Optional[Gpar] = None,
