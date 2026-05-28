@@ -761,8 +761,15 @@ def parse_r_colour(c: Any) -> Tuple[float, float, float, float]:
         s = c.strip()
         low = s.lower()
 
-        # Transparent / NA
-        if low in ("transparent", "na", "none", ""):
+        # R's ``col2rgb("transparent", alpha=TRUE)`` returns (255, 255, 255, 0)
+        # — by R convention the RGB channels are white even though α=0
+        # makes the colour invisible.  Mirror exactly so hex round-trips
+        # and downstream tooling that compares against R's encoding agree.
+        if low == "transparent":
+            return (1.0, 1.0, 1.0, 0.0)
+        # NA / none / "" are Python-port-specific transparent sentinels not
+        # defined as parseable colours in R (``col2rgb('NA')`` errors).
+        if low in ("na", "none", ""):
             return (0.0, 0.0, 0.0, 0.0)
 
         # Hex colour

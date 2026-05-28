@@ -486,7 +486,10 @@ class TestParseColour:
     """Test _parse_colour with various inputs."""
 
     def test_transparent(self):
-        assert _parse_colour("transparent") == (0.0, 0.0, 0.0, 0.0)
+        # R's ``col2rgb("transparent", alpha=TRUE)`` returns
+        # (255, 255, 255, 0) — by R convention the RGB channels are
+        # white when alpha=0.  Mirror exactly per R as gold standard.
+        assert _parse_colour("transparent") == (1.0, 1.0, 1.0, 0.0)
 
     def test_na(self):
         assert _parse_colour("NA") == (0.0, 0.0, 0.0, 0.0)

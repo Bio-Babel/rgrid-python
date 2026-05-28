@@ -457,8 +457,9 @@ class TestViewportNavigation:
         fresh_state.push_viewport(vp)
         fresh_state.pop_viewport(0)
         root = fresh_state.current_viewport()
-        # Root is a dict with name "ROOT"
-        assert root["name"] == "ROOT"
+        # Root is now a SimpleNamespace so ``root.name`` works (matches
+        # R's ``current.viewport()$name`` attribute access).
+        assert getattr(root, "name", None) == "ROOT"
 
     def test_up_does_not_remove(self, fresh_state):
         vp = Viewport(name="child")

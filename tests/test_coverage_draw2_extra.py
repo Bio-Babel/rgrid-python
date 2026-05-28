@@ -356,6 +356,27 @@ class TestRenderDispatch:
                         return float(val._values[0])
                     return float(val)
                 return resolve_scalar
+            if name == "resolve_loc":
+                # paired (x, y) resolver — return (x_val, y_val) as floats
+                def resolve_loc(x_val, y_val, gp=None):
+                    from grid_py._units import Unit
+                    def _f(v):
+                        if isinstance(v, Unit):
+                            return float(v._values[0])
+                        return float(v)
+                    return _f(x_val), _f(y_val)
+                return resolve_loc
+            if name == "resolve_loc_array":
+                # paired array resolver — return (x_arr, y_arr)
+                def resolve_loc_array(x_vals, y_vals, gp=None):
+                    import numpy as _np
+                    from grid_py._units import Unit
+                    def _arr(v):
+                        if isinstance(v, Unit):
+                            return _np.asarray(v._values, dtype=float)
+                        return _np.atleast_1d(_np.asarray(v, dtype=float))
+                    return _arr(x_vals), _arr(y_vals)
+                return resolve_loc_array
             if name.startswith("resolve_") and name.endswith("_array"):
                 def resolve_array(val, gp=None):
                     import numpy as _np

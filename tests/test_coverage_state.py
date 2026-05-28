@@ -28,11 +28,18 @@ class TestHelpers:
     """Tests for module-level helper functions."""
 
     def test_make_root_viewport(self):
+        # ``_make_root_viewport`` now returns a ``SimpleNamespace`` instead
+        # of a dict so that ``current_viewport().xscale`` works as the
+        # R-style ``current.viewport()$xscale`` (attribute access).
+        # The duck-typed ``_vp_attr`` helper still works either way.
         root = _make_root_viewport()
-        assert root["name"] == "ROOT"
-        assert root["parent"] is None
-        assert isinstance(root["children"], list)
-        assert root["layout_pos"] is None
+        assert root.name == "ROOT"
+        assert root.parent is None
+        assert isinstance(root.children, list)
+        assert root.layout_pos is None
+        # Default xscale/yscale before init_device binds a renderer.
+        assert root.xscale == (0.0, 1.0)
+        assert root.yscale == (0.0, 1.0)
 
     def test_vp_attr_dict(self):
         vp = {"name": "test", "x": 42}

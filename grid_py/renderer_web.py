@@ -759,7 +759,13 @@ class WebRenderer(GridRenderer):
         self._node_stack = [self._scene_root]
         # Re-init base class viewport stack
         from ._vp_calc import calc_root_transform
-        root_vtr = calc_root_transform(self.width_in * 2.54, self.height_in * 2.54)
+        # Web renderer emits SVG → device units are CSS px = 1/96 inch.
+        # Use that so unit("native", ...) at root matches R's pixel-based
+        # convention for raster-like surfaces.
+        root_vtr = calc_root_transform(
+            self.width_in * 2.54, self.height_in * 2.54,
+            dev_units_per_inch=96.0,
+        )
         self._vp_transform_stack = [root_vtr]
         self._vp_obj_stack = [None]
         self._layout_stack = []

@@ -955,16 +955,58 @@ def calc_viewport_transform(
 def calc_root_transform(
     device_width_cm: float,
     device_height_cm: float,
+    dev_units_per_inch: Optional[float] = None,
+    y_down: bool = True,
 ) -> ViewportTransformResult:
     """Compute the root (device-level) viewport transform.
 
-    Port of ``viewport.c:233-260``: when the parent is NULL (top-level
-    viewport), the parent is the device itself.
+    Port of ``viewport.c:initVP`` (src/viewport.c:384-420 in R 4.5.3).
+    After the R-level ``grid.top.level.vp()`` constructs a default
+    viewport (xscale=c(0,1), yscale=c(0,1)), R immediately overrides
+    those scales with the device coordinate range::
+
+        REAL(xscale)[0] = dd->dev->left;
+        REAL(xscale)[1] = dd->dev->right;
+        REAL(yscale)[0] = dd->dev->bottom;
+        REAL(yscale)[1] = dd->dev->top;
+
+    For a raster device the range is in pixels; for a vector device it
+    is in points (1/72 inch).  In grid_py the unit-per-inch is encoded
+    by *dev_units_per_inch*: ``dpi`` for raster surfaces, ``72`` for
+    vector.  When that argument is omitted we fall back to (0, 1) —
+    the historical behaviour — purely to avoid breaking callers that
+    don't yet thread dpi through; new code should pass it.
+
+    Parameters
+    ----------
+    device_width_cm, device_height_cm
+        Physical canvas size in centimetres.
+    dev_units_per_inch
+        Device units per inch (``dpi`` for raster, ``72`` for vector).
+        When supplied, ``xscale=(0, dev_w_px)`` and
+        ``yscale=(0, dev_h_px)`` so that ``unit(v, "native")`` at the
+        root viewport resolves to device pixels exactly as in R.
     """
+    if dev_units_per_inch is not None and dev_units_per_inch > 0:
+        dev_w_px = (device_width_cm / 2.54) * dev_units_per_inch
+        dev_h_px = (device_height_cm / 2.54) * dev_units_per_inch
+        xscale = (0.0, float(dev_w_px))
+        # R's PNG / raster devices have ``dev->bottom = h_px`` and
+        # ``dev->top = 0`` (pixel y increases downward), so initVP
+        # produces ``yscale = (h_px, 0)``.  Vector devices (PDF, PS)
+        # are bottom-up: ``yscale = (0, h_pt)``.  Mirror both.
+        if y_down:
+            yscale = (float(dev_h_px), 0.0)
+        else:
+            yscale = (0.0, float(dev_h_px))
+    else:
+        xscale = (0.0, 1.0)
+        yscale = (0.0, 1.0)
+
     return ViewportTransformResult(
         width_cm=device_width_cm,
         height_cm=device_height_cm,
         rotation_angle=0.0,
         transform=identity(),
-        vpc=ViewportContext(xscale=(0.0, 1.0), yscale=(0.0, 1.0)),
+        vpc=ViewportContext(xscale=xscale, yscale=yscale),
     )

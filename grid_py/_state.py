@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 from collections import deque
+from types import SimpleNamespace
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -50,15 +51,31 @@ def _make_root_viewport() -> Any:
     dict
         A mapping that quacks like a viewport for bootstrap purposes.
     """
-    return {
-        "name": "ROOT",
-        "parent": None,
-        "children": [],
-        "layout_pos": None,
-        "gpar": Gpar(),
-        "rotation": 0.0,
-        "transform": np.eye(3, dtype=np.float64),
-    }
+    # Default xscale/yscale = (0, 1).  At ``init_device`` time these get
+    # overwritten with (0, dev_w_px) / (0, dev_h_px) to mirror R's
+    # ``initVP`` (src/viewport.c:399-406):
+    #   REAL(xscale)[0] = dd->dev->left;
+    #   REAL(xscale)[1] = dd->dev->right;
+    #   REAL(yscale)[0] = dd->dev->bottom;
+    #   REAL(yscale)[1] = dd->dev->top;
+    # which is what makes ``unit(..., "native")`` resolve to device pixels
+    # at the root viewport.
+    #
+    # We expose the root as a ``SimpleNamespace`` so callers can use the
+    # R-style ``vp.xscale`` / ``vp.yscale`` attribute access (mirroring
+    # ``current.viewport()$xscale`` in R) while still keeping the duck-
+    # typed dict-style ``_vp_attr`` helper.
+    return SimpleNamespace(
+        name="ROOT",
+        parent=None,
+        children=[],
+        layout_pos=None,
+        gpar=Gpar(),
+        rotation=0.0,
+        transform=np.eye(3, dtype=np.float64),
+        xscale=(0.0, 1.0),
+        yscale=(0.0, 1.0),
+    )
 
 
 def _vp_attr(vp: Any, attr: str, default: Any = None) -> Any:
@@ -508,10 +525,25 @@ class GridState:
         float
             The sum of ``rotation`` attributes from root to current viewport.
         """
+        # R always treats a missing or NULL rotation as 0 (src/viewport.c:
+        # initVP / addRotation paths default angle=0).  Mirror that here
+        # without try/except.
+        #
+        # Two attribute names coexist in grid_py for historical reasons:
+        # ``Viewport`` instances expose the user-supplied angle as
+        # ``vp.angle`` (matching R's ``viewport(angle=)`` argument), while
+        # the root SimpleNamespace + pushedvp metadata uses ``rotation``.
+        # Both designate the same quantity — this viewport's own rotation
+        # contribution — so we read whichever is present, preferring
+        # ``angle`` for Viewport / R parity.  R itself walks the vp stack
+        # summing each vp's ``angle`` slot, which is what we mirror.
         total: float = 0.0
         vp: Any = self._current_vp
         while vp is not None:
-            total += float(_vp_attr(vp, "rotation", 0.0))
+            rot = _vp_attr(vp, "angle", None)
+            if rot is None:
+                rot = _vp_attr(vp, "rotation", 0.0)
+            total += float(rot if rot is not None else 0.0)
             vp = _vp_parent(vp)
         return total
 
@@ -685,6 +717,32 @@ class GridState:
             height_cm = h_in * 2.54 if h_in > 0 else _DEFAULT_DEVICE_HEIGHT_CM
         self._device_width_cm = float(width_cm)
         self._device_height_cm = float(height_cm)
+
+        # Mirror R src/viewport.c:initVP — set the ROOT viewport's
+        # xscale/yscale to the device coord range.  The orientation
+        # follows the device convention:
+        #   raster (PNG, CairoImage): pixel coords, y INCREASES DOWN
+        #     → xscale=(0, w_px), yscale=(h_px, 0)
+        #   vector (PDF, SVG, PS):    point coords, y INCREASES UP
+        #     → xscale=(0, w_pt), yscale=(0, h_pt)
+        # The renderer's ``_surface_type`` ("image" vs anything else)
+        # tells us which axis convention to use.  This keeps the dict-
+        # accessible xscale/yscale in sync with the transform stack's
+        # ``vpc`` (set by ``calc_root_transform`` in _vp_calc.py).
+        dpi = float(getattr(renderer, "dpi", 0.0) or 0.0)
+        if dpi > 0:
+            surface_type = getattr(renderer, "_surface_type", "image")
+            if surface_type == "image":
+                dev_w = self._device_width_cm / 2.54 * dpi
+                dev_h = self._device_height_cm / 2.54 * dpi
+                _vp_set_attr(self._vp_tree, "xscale", (0.0, dev_w))
+                _vp_set_attr(self._vp_tree, "yscale", (dev_h, 0.0))
+            else:
+                # Vector surface: 72 user units per inch, y-up.
+                dev_w = self._device_width_cm / 2.54 * 72.0
+                dev_h = self._device_height_cm / 2.54 * 72.0
+                _vp_set_attr(self._vp_tree, "xscale", (0.0, dev_w))
+                _vp_set_attr(self._vp_tree, "yscale", (0.0, dev_h))
 
     def get_renderer(self) -> Any:
         """Return the current rendering backend.

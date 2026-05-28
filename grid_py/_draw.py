@@ -307,8 +307,16 @@ def _render_grob(
 
     # ---- rect -----------------------------------------------------------
     if cls == "rect":
-        xs = renderer.resolve_x_array(getattr(grob, "x", [0.0]), gp=gp)
-        ys = renderer.resolve_y_array(getattr(grob, "y", [0.0]), gp=gp)
+        # Use paired resolve_loc_array so that under a rotated viewport
+        # each rect's anchor (x_i, y_i) is mapped through the full 2-D
+        # CTM together, not via two independent 1-D projections (which
+        # silently drop the rotation contribution from the orthogonal
+        # axis — see _renderer_base.resolve_x_array docstring).
+        xs, ys = renderer.resolve_loc_array(
+            getattr(grob, "x", [0.0]),
+            getattr(grob, "y", [0.0]),
+            gp=gp,
+        )
         ws = renderer.resolve_w_array(getattr(grob, "width", [1.0]), gp=gp)
         hs = renderer.resolve_h_array(getattr(grob, "height", [1.0]), gp=gp)
         hj, vj = _resolve_just(grob)
@@ -331,9 +339,11 @@ def _render_grob(
 
     # ---- roundrect ------------------------------------------------------
     elif cls == "roundrect":
+        ax, ay = renderer.resolve_loc(
+            getattr(grob, "x", 0.0), getattr(grob, "y", 0.0), gp=gp,
+        )
         renderer.draw_roundrect(
-            x=renderer.resolve_x(getattr(grob, "x", 0.0), gp=gp),
-            y=renderer.resolve_y(getattr(grob, "y", 0.0), gp=gp),
+            x=ax, y=ay,
             w=renderer.resolve_w(getattr(grob, "width", 1.0), gp=gp),
             h=renderer.resolve_h(getattr(grob, "height", 1.0), gp=gp),
             r=renderer.resolve_w(getattr(grob, "r", 0.0), gp=gp),
@@ -344,17 +354,22 @@ def _render_grob(
 
     # ---- circle ---------------------------------------------------------
     elif cls == "circle":
+        cx, cy = renderer.resolve_loc(
+            getattr(grob, "x", 0.5), getattr(grob, "y", 0.5), gp=gp,
+        )
         renderer.draw_circle(
-            x=renderer.resolve_x(getattr(grob, "x", 0.5), gp=gp),
-            y=renderer.resolve_y(getattr(grob, "y", 0.5), gp=gp),
+            x=cx, y=cy,
             r=renderer.resolve_w(getattr(grob, "r", 0.5), gp=gp),
             gp=gp,
         )
 
     # ---- lines / polyline ------------------------------------------------
     elif cls in ("lines", "polyline"):
-        x = renderer.resolve_x_array(getattr(grob, "x", [0.0, 1.0]), gp=gp)
-        y = renderer.resolve_y_array(getattr(grob, "y", [0.0, 1.0]), gp=gp)
+        x, y = renderer.resolve_loc_array(
+            getattr(grob, "x", [0.0, 1.0]),
+            getattr(grob, "y", [0.0, 1.0]),
+            gp=gp,
+        )
         id_ = getattr(grob, "id", None)
         id_lengths = getattr(grob, "id_lengths", None)
         # R polylineGrob supports either `id` (per-point group) or
@@ -368,12 +383,36 @@ def _render_grob(
             id_ = np.atleast_1d(np.asarray(id_, dtype=int))
         renderer.draw_polyline(x, y, id_=id_, gp=gp)
 
+        # R linesGrob / polylineGrob carry an optional ``arrow=`` (port
+        # of src/grid.c::L_lines / L_polyline arrowhead emission).  The
+        # earlier code consumed it for ``segmentsGrob`` only, silently
+        # dropping it on lines / polyline — symptom: an arrow= argument
+        # produced a bare line.  Apply ``_draw_arrow_heads`` per
+        # polyline (each unique id) here, with the same reference-point
+        # convention segments uses.
+        arr = getattr(grob, "arrow", None)
+        if arr is not None:
+            if id_ is not None:
+                for uid in np.unique(id_):
+                    mask = id_ == uid
+                    if int(np.sum(mask)) >= 2:
+                        _draw_arrow_heads(
+                            np.asarray(x)[mask], np.asarray(y)[mask],
+                            arr, renderer, gp,
+                        )
+            elif len(x) >= 2:
+                _draw_arrow_heads(
+                    np.asarray(x), np.asarray(y), arr, renderer, gp,
+                )
+
     # ---- segments --------------------------------------------------------
     elif cls == "segments":
-        x0 = renderer.resolve_x_array(getattr(grob, "x0", []), gp=gp)
-        y0 = renderer.resolve_y_array(getattr(grob, "y0", []), gp=gp)
-        x1 = renderer.resolve_x_array(getattr(grob, "x1", []), gp=gp)
-        y1 = renderer.resolve_y_array(getattr(grob, "y1", []), gp=gp)
+        x0, y0 = renderer.resolve_loc_array(
+            getattr(grob, "x0", []), getattr(grob, "y0", []), gp=gp,
+        )
+        x1, y1 = renderer.resolve_loc_array(
+            getattr(grob, "x1", []), getattr(grob, "y1", []), gp=gp,
+        )
         renderer.draw_segments(x0=x0, y0=y0, x1=x1, y1=y1, gp=gp)
 
         # Each segment may carry its own arrowhead (``arrow=`` parameter on
@@ -392,8 +431,11 @@ def _render_grob(
     elif cls == "xspline":
         from ._curve import _calc_xspline_points  # lazy to avoid import cycle
 
-        x = renderer.resolve_x_array(getattr(grob, "x", [0.0, 1.0]), gp=gp)
-        y = renderer.resolve_y_array(getattr(grob, "y", [0.0, 1.0]), gp=gp)
+        x, y = renderer.resolve_loc_array(
+            getattr(grob, "x", [0.0, 1.0]),
+            getattr(grob, "y", [0.0, 1.0]),
+            gp=gp,
+        )
         shape_raw = getattr(grob, "shape", 0.0)
         open_ = bool(getattr(grob, "open_", True))
         rep_ends = bool(getattr(grob, "repEnds", True))
@@ -474,8 +516,9 @@ def _render_grob(
 
     # ---- polygon ---------------------------------------------------------
     elif cls == "polygon":
-        px = renderer.resolve_x_array(getattr(grob, "x", []), gp=gp)
-        py = renderer.resolve_y_array(getattr(grob, "y", []), gp=gp)
+        px, py = renderer.resolve_loc_array(
+            getattr(grob, "x", []), getattr(grob, "y", []), gp=gp,
+        )
         pid = getattr(grob, "id", None)
         if pid is not None:
             # R semantics: polygonGrob(id=...) draws separate polygons
@@ -509,9 +552,8 @@ def _render_grob(
         else:
             labels = [str(label_raw)]
 
-        # Resolve x/y to arrays
-        xx = renderer.resolve_x_array(x_unit, gp=gp)
-        yy = renderer.resolve_y_array(y_unit, gp=gp)
+        # Resolve x/y as pairs so rotation contribution is preserved.
+        xx, yy = renderer.resolve_loc_array(x_unit, y_unit, gp=gp)
 
         # Normalise rot to array
         if isinstance(rot_raw, (list, tuple, np.ndarray)):
@@ -560,9 +602,11 @@ def _render_grob(
             pch_val = int(pch_raw)
         else:
             pch_val = 19
+        pts_x, pts_y = renderer.resolve_loc_array(
+            getattr(grob, "x", []), getattr(grob, "y", []), gp=gp,
+        )
         renderer.draw_points(
-            x=renderer.resolve_x_array(getattr(grob, "x", []), gp=gp),
-            y=renderer.resolve_y_array(getattr(grob, "y", []), gp=gp),
+            x=pts_x, y=pts_y,
             size=renderer.resolve_w(getattr(grob, "size", 1.0), gp=gp),
             pch=pch_val,
             gp=gp,
@@ -570,18 +614,63 @@ def _render_grob(
 
     # ---- pathgrob --------------------------------------------------------
     elif cls == "pathgrob":
-        x = renderer.resolve_x_array(getattr(grob, "x", []), gp=gp)
-        y = renderer.resolve_y_array(getattr(grob, "y", []), gp=gp)
-        path_id = getattr(grob, "pathId", None)
-        if path_id is None:
-            path_id = np.ones(len(x), dtype=int)
-        else:
-            path_id = np.atleast_1d(np.asarray(path_id, dtype=int))
-        renderer.draw_path(
-            x=x, y=y, path_id=path_id,
-            rule=getattr(grob, "rule", "winding"),
-            gp=gp,
+        x, y = renderer.resolve_loc_array(
+            getattr(grob, "x", []), getattr(grob, "y", []), gp=gp,
         )
+        # R ``pathGrob`` carries two grouping levels (src/grid.c::L_path):
+        #
+        #   - id / id_lengths : per-point SUB-PATH identifier — each
+        #     unique value is one closed Cairo sub-path.
+        #   - path_id / path_id_lengths : per-sub-path COMPOUND grouping
+        #     — each compound is filled+stroked independently with its
+        #     own fill rule application.
+        #
+        # The earlier port read ``grob.pathId`` (camelCase, never stored
+        # by path_grob) and ignored ``grob.id`` entirely, so every path
+        # collapsed into a single 8-vertex sub-path that connected the
+        # two rectangles into a bow-tie.  Read both attributes properly
+        # here and pass the per-point sub-path identifier through to
+        # ``draw_path`` (which iterates unique values).
+        sub_id = getattr(grob, "id", None)
+        sub_id_lengths = getattr(grob, "id_lengths", None)
+        if sub_id is None and sub_id_lengths is not None:
+            lengths = np.atleast_1d(np.asarray(sub_id_lengths, dtype=int))
+            sub_id = np.repeat(np.arange(1, len(lengths) + 1), lengths)
+        if sub_id is None:
+            sub_id = np.ones(len(x), dtype=int)
+        else:
+            sub_id = np.atleast_1d(np.asarray(sub_id, dtype=int))
+
+        # Optional second-level compound grouping.  R fills each
+        # compound separately with its own fill-rule application.  Most
+        # uses (and every current test) have a single compound; we
+        # iterate when more are supplied.
+        path_id = getattr(grob, "path_id", None)
+        path_id_lengths = getattr(grob, "path_id_lengths", None)
+        if path_id is None and path_id_lengths is not None:
+            lengths = np.atleast_1d(np.asarray(path_id_lengths, dtype=int))
+            path_id = np.repeat(np.arange(1, len(lengths) + 1), lengths)
+        rule = getattr(grob, "rule", "winding")
+
+        if path_id is None:
+            renderer.draw_path(
+                x=x, y=y, path_id=sub_id, rule=rule, gp=gp,
+            )
+        else:
+            # Map per-point compound id from per-sub-path path_id.
+            path_id_arr = np.atleast_1d(np.asarray(path_id, dtype=int))
+            unique_subs = np.unique(sub_id)
+            sub_to_compound = {int(s): int(path_id_arr[k % len(path_id_arr)])
+                               for k, s in enumerate(unique_subs)}
+            point_compound = np.asarray(
+                [sub_to_compound[int(s)] for s in sub_id], dtype=int,
+            )
+            for ck in np.unique(point_compound):
+                mask = point_compound == ck
+                renderer.draw_path(
+                    x=x[mask], y=y[mask], path_id=sub_id[mask],
+                    rule=rule, gp=gp,
+                )
 
     # ---- rastergrob ------------------------------------------------------
     elif cls == "rastergrob":
@@ -590,8 +679,9 @@ def _render_grob(
             image = getattr(grob, "image", None)
         if image is not None:
             hj, vj = _resolve_just(grob)
-            raw_x = renderer.resolve_x(getattr(grob, "x", 0.0), gp=gp)
-            raw_y = renderer.resolve_y(getattr(grob, "y", 0.0), gp=gp)
+            raw_x, raw_y = renderer.resolve_loc(
+                getattr(grob, "x", 0.0), getattr(grob, "y", 0.0), gp=gp,
+            )
             raw_w = renderer.resolve_w(getattr(grob, "width", 1.0), gp=gp)
             raw_h = renderer.resolve_h(getattr(grob, "height", 1.0), gp=gp)
             # `renderer.draw_raster` expects the *top-left* corner in y-down

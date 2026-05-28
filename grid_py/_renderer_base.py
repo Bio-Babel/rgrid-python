@@ -91,7 +91,17 @@ class GridRenderer(ABC):
         # containing width_cm, height_cm, rotation_angle, 3×3 transform matrix,
         # and ViewportContext (xscale/yscale).
         # The root entry represents the device itself.
-        root_vtr = calc_root_transform(self._device_width_cm, self._device_height_cm)
+        # ``y_down`` is True for raster surfaces (PNG / ImageSurface),
+        # False for vector surfaces (PDF / SVG / PS) — matches R's
+        # per-device behaviour in src/viewport.c:initVP.  We probe the
+        # subclass via ``_surface_type`` (CairoRenderer's flag); raster
+        # is the default when the subclass has not declared one.
+        _surface_type = getattr(self, "_surface_type", "image")
+        root_vtr = calc_root_transform(
+            self._device_width_cm, self._device_height_cm,
+            dev_units_per_inch=self._dev_units_per_inch,
+            y_down=(_surface_type == "image"),
+        )
         self._vp_transform_stack: List[ViewportTransformResult] = [root_vtr]
 
         # Keep a parallel list of viewport objects for attribute access
@@ -216,7 +226,14 @@ class GridRenderer(ABC):
         # layout (for its children).  In R, layout_pos determines the
         # viewport's own size/position first, then the layout applies
         # within that region.
-        if layout_pos_row is not None and layout_pos_col is not None:
+        #
+        # Per R src/layout.c:617-633 ``calcViewportLocationFromLayout``:
+        # exactly ONE of layoutPosRow / layoutPosCol may be NULL — that
+        # is interpreted as "occupy all rows/cols".  We mirror the
+        # behaviour here so e.g. ``viewport(layout_pos_col=i)`` in a
+        # 1-row layout correctly spans the whole row instead of
+        # collapsing back to centre.
+        if layout_pos_row is not None or layout_pos_col is not None:
             if self._layout_stack:
                 grid = self._layout_stack[-1]
                 col_starts = grid["col_starts"]
@@ -224,11 +241,19 @@ class GridRenderer(ABC):
                 row_starts = grid["row_starts"]
                 row_heights = grid["row_heights"]
 
-                if isinstance(layout_pos_row, (list, tuple)):
+                if layout_pos_row is None:
+                    # NULL → span all rows (R layout.c:621-624).
+                    t = 0
+                    b = len(row_heights) - 1
+                elif isinstance(layout_pos_row, (list, tuple)):
                     t, b = int(layout_pos_row[0]) - 1, int(layout_pos_row[1]) - 1
                 else:
                     t = b = int(layout_pos_row) - 1
-                if isinstance(layout_pos_col, (list, tuple)):
+                if layout_pos_col is None:
+                    # NULL → span all cols (R layout.c:628-631).
+                    l = 0
+                    r = len(col_widths) - 1
+                elif isinstance(layout_pos_col, (list, tuple)):
                     l, r = int(layout_pos_col[0]) - 1, int(layout_pos_col[1]) - 1
                 else:
                     l = r = int(layout_pos_col) - 1
@@ -857,18 +882,24 @@ class GridRenderer(ABC):
         h_in = _details_inches(height_details, "y")
 
         # hjust / vjust control which corner of the box is anchored at (x, y).
-        def _just_to_float(v: Any, default: float) -> float:
-            if v is None:
-                return default
-            if isinstance(v, (int, float)):
-                return float(v)
-            _H = {"left": 0.0, "right": 1.0, "centre": 0.5, "center": 0.5}
-            _V = {"bottom": 0.0, "top": 1.0, "centre": 0.5, "center": 0.5}
-            s = str(v).lower()
-            return _H.get(s, _V.get(s, default))
+        #
+        # Per R/just.R (4.5.3) ``resolveHJust`` / ``resolveVJust``:
+        # when ``hjust`` / ``vjust`` is NULL the value is derived from
+        # ``just`` (which may be a string like ``"left"`` or a 2-element
+        # vector).  Previously this code looked at ``grob.hjust`` and
+        # ``grob.vjust`` only, so a grob built with
+        # ``rect_grob(just="left")`` (which stores ``hjust=None``,
+        # ``just="left"``) fell back to centre.  Going through the
+        # shared ``resolve_hjust`` / ``resolve_vjust`` helpers brings
+        # the bbox computation in line with R for every just-string
+        # form (single string, tuple of strings, numeric, mixed).
+        from ._just import resolve_hjust, resolve_vjust
 
-        hjust = _just_to_float(getattr(grob, "hjust", 0.5), 0.5)
-        vjust = _just_to_float(getattr(grob, "vjust", 0.5), 0.5)
+        just = getattr(grob, "just", None)
+        if just is None:
+            just = "centre"
+        hjust = float(resolve_hjust(just, getattr(grob, "hjust", None)))
+        vjust = float(resolve_vjust(just, getattr(grob, "vjust", None)))
 
         # Centre of the bounding box in inches.
         cx = x_inches + (0.5 - hjust) * w_in
@@ -1090,7 +1121,16 @@ class GridRenderer(ABC):
         return self.inches_to_dev_h(inches)
 
     def resolve_x_array(self, val: Any, gp: Optional[Any] = None) -> "np.ndarray":
-        """Resolve *val* to an array of device x-coordinates."""
+        """Resolve *val* to an array of device x-coordinates.
+
+        WARNING: this method evaluates each ``x_i`` against a hard-coded
+        ``y=0``.  That is exact for an unrotated viewport, but for a
+        viewport with non-zero ``angle`` the rotation component of the
+        2-D CTM mixes the x and y axes — the y=0 stub then drops part
+        of the answer.  ``resolve_loc_array`` (below) does the
+        rotation-correct pairing and is what every drawing site
+        should use whenever an associated ``y`` array exists.
+        """
         from ._units import Unit
         if isinstance(val, Unit):
             out = np.empty(len(val), dtype=float)
@@ -1103,8 +1143,90 @@ class GridRenderer(ABC):
             return np.asarray([self.resolve_x(v, gp) for v in val], dtype=float)
         return np.atleast_1d(np.asarray(val, dtype=float))
 
+    def resolve_loc(
+        self,
+        x_val: Any,
+        y_val: Any,
+        gp: Optional[Any] = None,
+    ) -> Tuple[float, float]:
+        """Resolve an ``(x, y)`` location pair to device coordinates.
+
+        Port of R's ``transformLocn`` (src/unit.c) one-shot pairing —
+        the inches values for both axes are passed through the
+        viewport's 3×3 transform together so that rotation correctly
+        mixes them.
+
+        Unlike ``resolve_x(val) + resolve_y(val)``, which each call
+        ``transform_loc_to_device`` with the orthogonal coord forced to
+        0 and so cannot represent the rotation contribution, this
+        helper preserves both inputs and matches ``device_loc``'s
+        algorithm.
+
+        Every grob-drawing site with a genuine 2-D anchor (rect,
+        circle, text, roundrect, raster, ...) should use this in
+        preference to the single-axis helpers.
+        """
+        x_in = self._resolve_to_inches(x_val, axis="x", is_dim=False, gp=gp)
+        y_in = self._resolve_to_inches(y_val, axis="y", is_dim=False, gp=gp)
+        return self.transform_loc_to_device(x_in, y_in)
+
+    def resolve_loc_array(
+        self,
+        x_vals: Any,
+        y_vals: Any,
+        gp: Optional[Any] = None,
+    ) -> Tuple["np.ndarray", "np.ndarray"]:
+        """Resolve parallel ``x`` / ``y`` arrays to device coord pairs.
+
+        Each ``(x_i, y_i)`` pair is mapped through the full 2-D vp
+        transform via ``transform_loc_to_device``, so polygon / lines /
+        segments / points vertices stay self-consistent under
+        rotation.  Length follows R's recycling rule — the longer of
+        ``len(x_vals)`` and ``len(y_vals)``.
+        """
+        from ._units import Unit
+
+        def _length(v: Any) -> int:
+            return len(v) if hasattr(v, "__len__") and not isinstance(v, str) else 1
+
+        nx = _length(x_vals)
+        ny = _length(y_vals)
+        n = max(nx, ny)
+
+        out_x = np.empty(n, dtype=float)
+        out_y = np.empty(n, dtype=float)
+
+        for i in range(n):
+            # x_i in inches (viewport-local frame)
+            if isinstance(x_vals, Unit):
+                x_in = self._resolve_to_inches_idx(x_vals, i % nx, "x", False, gp)
+            elif isinstance(x_vals, (list, tuple, np.ndarray)):
+                x_in = self._resolve_to_inches(
+                    x_vals[i % nx], axis="x", is_dim=False, gp=gp,
+                )
+            else:
+                x_in = self._resolve_to_inches(x_vals, axis="x", is_dim=False, gp=gp)
+            # y_i in inches
+            if isinstance(y_vals, Unit):
+                y_in = self._resolve_to_inches_idx(y_vals, i % ny, "y", False, gp)
+            elif isinstance(y_vals, (list, tuple, np.ndarray)):
+                y_in = self._resolve_to_inches(
+                    y_vals[i % ny], axis="y", is_dim=False, gp=gp,
+                )
+            else:
+                y_in = self._resolve_to_inches(y_vals, axis="y", is_dim=False, gp=gp)
+
+            out_x[i], out_y[i] = self.transform_loc_to_device(x_in, y_in)
+
+        return out_x, out_y
+
     def resolve_y_array(self, val: Any, gp: Optional[Any] = None) -> "np.ndarray":
-        """Resolve *val* to an array of device y-coordinates."""
+        """Resolve *val* to an array of device y-coordinates.
+
+        Like ``resolve_x_array`` this loses the rotation contribution
+        from the orthogonal axis (x is forced to 0).  Prefer
+        ``resolve_loc_array`` whenever a paired x is available.
+        """
         from ._units import Unit
         if isinstance(val, Unit):
             out = np.empty(len(val), dtype=float)

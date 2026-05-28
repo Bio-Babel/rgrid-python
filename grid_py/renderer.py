@@ -274,7 +274,11 @@ class CairoRenderer(GridRenderer):
         from ._vp_calc import calc_root_transform
         mask_w_in = float(dw) / self.dpi
         mask_h_in = float(dh) / self.dpi
-        root_vtr = calc_root_transform(mask_w_in * 2.54, mask_h_in * 2.54)
+        # Mask surfaces are raster (Cairo IMAGE) → use dpi as device units/in.
+        root_vtr = calc_root_transform(
+            mask_w_in * 2.54, mask_h_in * 2.54,
+            dev_units_per_inch=self.dpi,
+        )
         mask_renderer._vp_transform_stack = [root_vtr]
         mask_renderer._vp_obj_stack = [None]
         mask_renderer._layout_stack = []
@@ -353,28 +357,48 @@ class CairoRenderer(GridRenderer):
 
     # ---- gpar application --------------------------------------------------
 
-    def _lwd_to_user(self, lwd_pt: float) -> float:
-        """Convert R-grid lwd (points) to a Cairo user-space line width.
+    # R-grid lwd unit conversion factor.
+    # ----------------------------------------------------------------
+    # R's gpar() lwd argument is in **1/96 inch** (per ?gpar in R 3.0+).
+    # Internally R's Cairo device (src/library/grDevices/src/cairoFns.c)
+    # converts lwd to cairo user-space (= points) using
+    #     cairo_user = lwd * 72.27 / 96
+    # — the 72.27 is the TeX big-point per inch constant R inherits
+    # from its PostScript ancestry, retained for backward parity with
+    # R's vector devices.  Reproducing the same constant here keeps
+    # stroke widths bit-for-bit identical with R Cairo across raster
+    # and vector surfaces.
+    _LWD_BIGPOINT_PER_96TH_INCH: float = 72.27 / 96.0
 
-        R's grid measures ``lwd`` in 1/72 inch (points) regardless of the
-        active viewport scale — a value of 1 should always produce a stroke
-        1pt wide on the output medium.  Cairo's ``set_line_width`` takes a
-        user-space distance, so we have to:
+    def _lwd_to_user(self, lwd: float) -> float:
+        """Convert R-grid lwd (units of 1/96 inch) to a Cairo user-space
+        line width.
 
-        1. Map points → device units.  Raster ``ImageSurface`` has 1 user
-           unit = 1 pixel, so device units per point = ``dpi/72``.  Vector
-           surfaces (PDF/SVG/PS) have 1 user unit = 1 pt, so the conversion
-           factor is 1.0.  Equivalently, use ``_dev_units_per_inch / 72``.
-        2. Undo any active CTM scaling via ``device_to_user_distance`` so
-           that nested viewports (which scale the CTM) do not also scale
-           the stroke.
+        Earlier this method treated ``lwd`` as if it were in points
+        (1/72 inch).  Empirical R-vs-grid_py measurement shows every
+        stroke is then 96/72 = 1.333× wider than R's — a port bug
+        affecting *all* primitives that stroke (rect / circle /
+        polygon / lines / segments / points-pch / arrow).  R's actual
+        convention is lwd = 1/96 inch, mirrored here via
+        ``_LWD_BIGPOINT_PER_96TH_INCH``.
 
-        This is the analogue of the font-size handling in ``_set_font``.
+        Pipeline:
+
+        1. Convert ``lwd × (72.27/96)`` (TeX points) to device units —
+           raster surfaces use ``dpi/72``; vector surfaces keep the
+           value in points.
+        2. Run the result through ``device_to_user_distance`` so any
+           CTM scaling (rotated/scaled viewport) does not also scale
+           the stroke.  This matches R's behaviour: ``lwd`` is a
+           device-level width, independent of viewport coordinate
+           changes.
         """
+        # 1/96 inch → TeX big-points (the unit R hands to Cairo)
+        lwd_bp = lwd * self._LWD_BIGPOINT_PER_96TH_INCH
         if self._surface_type == "image":
-            lw_dev = lwd_pt * self.dpi / 72.0
+            lw_dev = lwd_bp * self.dpi / 72.0
         else:
-            lw_dev = lwd_pt
+            lw_dev = lwd_bp
         try:
             ux, uy = self._ctx.device_to_user_distance(lw_dev, lw_dev)
             return max(abs(ux), abs(uy))
@@ -840,9 +864,45 @@ class CairoRenderer(GridRenderer):
         vjust: float = 0.5,
         gp: Optional[Gpar] = None,
     ) -> None:
-        """Draw a rectangle.  x, y, w, h are in device coordinates."""
+        """Draw a rectangle.
+
+        Parameters
+        ----------
+        x, y : float
+            Anchor point in **device coords** (already mapped through
+            the viewport CTM, including rotation, by
+            ``resolve_loc_array``).
+        w, h : float
+            Width / height in device units of the viewport-local
+            (i.e. unrotated) frame.
+        hjust, vjust : float
+            Justification of the rect relative to ``(x, y)``.
+        gp : Gpar, optional
+            Graphical parameters.
+
+        Implementation note
+        -------------------
+        ``(x, y)`` is the *rotated* anchor and ``(w, h)`` are the
+        *unrotated* dimensions, so we still have to orient the box.
+        We rotate the Cairo CTM around the anchor by the cumulative
+        viewport rotation; the axis-aligned ``ctx.rectangle`` then
+        becomes the rotated rect in device space.  This matches R's
+        grid C engine which applies the device CTM (including
+        rotation) at draw time — see ``src/grid.c``'s ``L_rect``
+        + the LTransform machinery in ``viewport.c``.
+        """
+        from ._state import get_state
+
         ctx = self._ctx
         ctx.save()
+
+        rotation_deg = float(get_state().current_rotation())
+        if abs(rotation_deg) > 1e-9:
+            # Cairo's y axis grows downward, R-grid's grows upward —
+            # invert sign so a positive R angle visually matches.
+            ctx.translate(x, y)
+            ctx.rotate(-math.radians(rotation_deg))
+            ctx.translate(-x, -y)
 
         # x,y is the anchor point; apply justification to get top-left
         dx = x - w * hjust
@@ -1404,17 +1464,40 @@ class CairoRenderer(GridRenderer):
         if len(pch_arr) < n:
             pch_arr = np.resize(pch_arr, n)
 
-        # --- per-point sizes from gpar.fontsize (R: cex * fontsize) ---
+        # --- per-point sizes ---------------------------------------
+        # Two paths, distinguished by where the size originated:
+        #
+        #   (1) ``gp.fontsize`` is set → ``size_arr`` is in points
+        #       (R: cex * fontsize), so we convert pt → device pixels
+        #       via ``dpi/72`` and halve to get a radius.
+        #
+        #   (2) ``gp.fontsize`` is absent → ``size`` is what _draw.py
+        #       resolved from ``grob.size`` via ``renderer.resolve_w``,
+        #       which already returns DEVICE PIXELS.  In that case the
+        #       previous code re-applied the dpi/72 scaling, producing
+        #       symbols ~``dpi/72``× too large (e.g. at 150 dpi the
+        #       diameter came out ~2× R).  Mirror R's points.c which
+        #       uses the size unit-resolved value directly as the
+        #       symbol diameter, so radius = size / 2.
+        size_from_fontsize: bool
         fs = gp.get("fontsize", None) if gp else None
         if isinstance(fs, (list, tuple, np.ndarray)):
             size_arr = np.asarray(fs, dtype=float)
+            size_from_fontsize = True
         elif fs is not None:
             size_arr = np.full(n, float(fs))
+            size_from_fontsize = True
         else:
             size_arr = np.full(n, float(size))
+            size_from_fontsize = False
 
-        # Radius conversion: fontsize (pt) → device pixels
-        scale = self.dpi / 72.0 * 0.5 if self._surface_type == "image" else 0.5
+        if size_from_fontsize:
+            # fontsize is in points → convert to device-pixel radius.
+            scale = (self.dpi / 72.0 * 0.5
+                     if self._surface_type == "image" else 0.5)
+        else:
+            # ``size`` already in device pixels (diameter) → radius=size/2.
+            scale = 0.5
 
         # --- per-point colours (col) ---
         col_raw = gp.get("col", None) if gp else None
@@ -1554,9 +1637,20 @@ class CairoRenderer(GridRenderer):
         vjust: float = 0.5,
         gp: Optional[Gpar] = None,
     ) -> None:
-        """Draw a rounded rectangle.  All coords in device units."""
+        """Draw a rounded rectangle.  Anchor in device units; (w, h)
+        in the viewport-local (unrotated) frame.  CTM rotation applied
+        around the anchor for the same reason as ``draw_rect``.
+        """
+        from ._state import get_state
+
         ctx = self._ctx
         ctx.save()
+
+        rotation_deg = float(get_state().current_rotation())
+        if abs(rotation_deg) > 1e-9:
+            ctx.translate(x, y)
+            ctx.rotate(-math.radians(rotation_deg))
+            ctx.translate(-x, -y)
 
         dx = x - w * hjust
         dy = y - h * (1.0 - vjust)
