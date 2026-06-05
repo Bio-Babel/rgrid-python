@@ -56,6 +56,7 @@ __all__ = [
     "arrows_grob",
     "grid_arrows",
     # points
+    "valid_pch",
     "points_grob",
     "grid_points",
     # rect
@@ -706,6 +707,70 @@ def grid_arrows(
 # ===================================================================== #
 
 
+def valid_pch(pch: Any) -> Any:
+    """Validate / normalise a plotting character (``pch``).
+
+    Faithful port of R's ``grid:::valid.pch`` (primitives.R:1504-1512)::
+
+        valid.pch <- function(pch) {
+          if (length(pch) == 0L) stop("zero-length 'pch'")
+          if (is.null(pch))      pch <- 1L
+          else if (!is.character(pch)) pch <- as.integer(pch)
+          pch
+        }
+
+    Semantics, verified against grid 4.5.3:
+
+    * **Zero-length** input (e.g. ``[]``, ``np.array([])``) → ``ValueError``.
+      (In R ``length(NULL) == 0`` so ``NULL`` also hits this branch and
+      errors; the ``is.null`` arm is effectively unreachable.  We keep a
+      ``None`` → ``1`` arm for ergonomics, matching the *written* R source
+      rather than its dead-code quirk, since ``None`` is the natural
+      Python sentinel for "use the default".)
+    * **Character** ``pch`` is kept *as character* (e.g. ``"."`` stays
+      ``"."``; the engine later draws it as a glyph / tiny point).
+    * **Any other (numeric)** ``pch`` is coerced to ``int`` (truncating
+      floats, mirroring ``as.integer``).
+    * **Mixed** sequences containing any character element are kept as an
+      object array of per-point values (R's ``c(".", 19, "A")`` coerces
+      to the character vector ``c(".", "19", "A")``; we preserve each
+      element so the per-point dispatch can decide glyph-vs-symbol).
+
+    Returns the normalised ``pch``: an ``int``, a ``str``, or a numpy
+    array of per-point values (int dtype if all-numeric, else object).
+    """
+    if pch is None:
+        return 1
+
+    if isinstance(pch, str):
+        return pch
+
+    if isinstance(pch, (int, np.integer)):
+        return int(pch)
+    if isinstance(pch, (float, np.floating)):
+        return int(pch)  # as.integer truncates toward zero
+
+    if isinstance(pch, (list, tuple, np.ndarray)):
+        arr = np.atleast_1d(np.asarray(pch, dtype=object))
+        if arr.size == 0:
+            raise ValueError("zero-length 'pch'")
+        # If any element is a (non-numeric) string, R coerces the whole
+        # vector to character.  We keep per-element values in an object
+        # array so the renderer can dispatch each point individually.
+        has_char = any(isinstance(v, (str, bytes, np.str_)) for v in arr)
+        if has_char:
+            return np.asarray(
+                [v if isinstance(v, (str, bytes, np.str_)) else str(v)
+                 for v in arr],
+                dtype=object,
+            )
+        # All numeric → integer array (as.integer).
+        return np.asarray([int(v) for v in arr], dtype=int)
+
+    # Fallback for any other scalar numeric-like (e.g. numpy bool):
+    return int(pch)
+
+
 def points_grob(
     x: Any = None,
     y: Any = None,
@@ -770,6 +835,8 @@ def points_grob(
         size = Unit(1, "char")
     else:
         size = _ensure_unit(size, default_units)
+    # R: validDetails.points -> x$pch <- valid.pch(x$pch)
+    pch = valid_pch(pch)
     return Grob(
         x=x, y=y, pch=pch, size=size,
         name=name, gp=gp, vp=vp, _grid_class="points",

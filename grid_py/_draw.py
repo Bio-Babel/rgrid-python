@@ -25,6 +25,7 @@ from ._state import get_state
 from ._display_list import DisplayList, DLDrawGrob
 from ._units import Unit
 from ._utils import grid_pretty as _grid_pretty
+from ._primitives import valid_pch
 
 __all__ = [
     "grid_draw",
@@ -595,13 +596,15 @@ def _render_grob(
     # ---- points ----------------------------------------------------------
     elif cls == "points":
         pch_raw = getattr(grob, "pch", 19)
-        # pch may be a scalar or per-point array — pass through as-is
-        if isinstance(pch_raw, (np.ndarray, list, tuple)):
-            pch_val = np.asarray(pch_raw, dtype=int)
-        elif isinstance(pch_raw, (int, float, np.integer, np.floating)):
-            pch_val = int(pch_raw)
-        else:
-            pch_val = 19
+        # pch may be a scalar (int or single character such as "."/"A")
+        # or a per-point array (possibly MIXED int/str, e.g.
+        # [".", 19, "A"]).  R keeps character pch as character and
+        # coerces numeric pch to int (grid:::valid.pch).  Normalise via
+        # the same helper and pass the result through *unchanged* — the
+        # renderer dispatches symbol-vs-glyph per point.  Do NOT force
+        # ``dtype=int`` (that crashes on "."), and do NOT substitute a
+        # silent default for non-numeric scalars (that masks bugs).
+        pch_val = valid_pch(pch_raw)
         pts_x, pts_y = renderer.resolve_loc_array(
             getattr(grob, "x", []), getattr(grob, "y", []), gp=gp,
         )

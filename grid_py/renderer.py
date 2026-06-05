@@ -1426,6 +1426,85 @@ class CairoRenderer(GridRenderer):
 
         ctx.restore()
 
+    def _draw_pch_dot(
+        self,
+        ctx: Any,
+        cx: float,
+        cy: float,
+        r: float,
+        col_rgba: Tuple[float, float, float, float],
+        cex: float = 1.0,
+    ) -> None:
+        """Draw R's ``pch="."`` — a *tiny* filled point.
+
+        R's engine (``GESymbol``) draws ``'.'`` as a small filled
+        **rectangle** whose side is an engine constant (~0.01 inch)
+        scaled by ``cex``, **independent of the symbol size**.  Verified
+        against grid 4.5.3: at 72 dpi the dot is ~1px regardless of the
+        points-grob ``size``, growing only with large ``cex``.  We
+        mirror that by drawing a small filled square (a circle would
+        antialias away at sub-pixel radius), so it reads as a single
+        dot rather than a full symbol-19 disc or a full-size glyph.
+
+        ``r`` (the resolved symbol radius) is intentionally unused for the
+        dot's *size* — kept in the signature for call-site symmetry.
+        """
+        # ~0.01 inch side at cex=1, in device units.  For image surfaces
+        # device units are pixels (dpi-scaled); for vector surfaces they
+        # are points (72 per inch).  Floor at 1 device unit so the dot is
+        # always a solidly-visible pixel (matching R, whose '.' never
+        # vanishes), exactly as R's GERect renders a minimum dot.
+        if self._surface_type == "image":
+            side = 0.01 * self.dpi * cex
+        else:
+            side = 0.01 * 72.0 * cex
+        side = max(side, 1.0)
+        half = side / 2.0
+        if col_rgba[3] > 0:
+            ctx.save()
+            ctx.new_path()
+            ctx.rectangle(cx - half, cy - half, side, side)
+            ctx.set_source_rgba(*col_rgba)
+            ctx.fill()
+            ctx.restore()
+
+    def _draw_pch_glyph(
+        self,
+        ctx: Any,
+        ch: str,
+        cx: float,
+        cy: float,
+        r: float,
+        col_rgba: Tuple[float, float, float, float],
+        gp: Optional[Gpar] = None,
+    ) -> None:
+        """Draw a single-character pch (e.g. ``"A"``) as a glyph.
+
+        R's engine renders a non-``'.'`` character pch as that glyph,
+        horizontally and vertically centred on the point, sized by the
+        font (``cex * fontsize``).  We reuse the renderer's font setup
+        and centre the glyph on ``(cx, cy)`` via its ink extents — the
+        same centring R uses for symbol text.
+        """
+        if not ch or col_rgba[3] <= 0:
+            return
+        ctx.save()
+        self._set_font(gp)
+        ext = ctx.text_extents(ch)
+        # Centre the glyph's ink box on (cx, cy).  text_extents gives
+        # x_bearing/y_bearing relative to the pen origin; centring the
+        # ink box requires offsetting by bearing + half-extent.
+        off_x = -(ext.x_bearing + ext.width / 2.0)
+        off_y = -(ext.y_bearing + ext.height / 2.0)
+        ctx.set_source_rgba(*col_rgba)
+        ctx.move_to(cx + off_x, cy + off_y)
+        if self._path_collecting:
+            ctx.text_path(ch)
+            ctx.fill()
+        else:
+            ctx.show_text(ch)
+        ctx.restore()
+
     def draw_points(
         self,
         x: np.ndarray,
@@ -1457,10 +1536,24 @@ class CairoRenderer(GridRenderer):
             return
 
         # --- per-point pch array ---
+        # ``pch`` may be a numeric symbol code (0-25), a single
+        # character (a glyph such as "A", or "." for R's tiny point),
+        # or a MIXED per-point sequence (e.g. [".", 19, "A"]).  R keeps
+        # character pch as character and coerces numerics to int
+        # (grid:::valid.pch), so the value reaching us is already
+        # normalised — we must NOT force ``dtype=int`` (it crashes on
+        # "."), only preserve each element as int-or-str in an object
+        # array and dispatch per point below.
         if isinstance(pch, (list, tuple, np.ndarray)):
-            pch_arr = np.asarray(pch, dtype=int)
+            pch_arr = np.atleast_1d(np.asarray(pch, dtype=object))
         else:
-            pch_arr = np.full(n, int(pch), dtype=int)
+            pch_arr = np.array([pch], dtype=object)
+        # Coerce numeric-looking scalars to int once, leave strings as-is.
+        pch_arr = np.array(
+            [int(p) if isinstance(p, (int, float, np.integer, np.floating))
+             else p for p in pch_arr],
+            dtype=object,
+        )
         if len(pch_arr) < n:
             pch_arr = np.resize(pch_arr, n)
 
@@ -1528,17 +1621,49 @@ class CairoRenderer(GridRenderer):
         else:
             lwd_arr = np.full(n, 1.0)
 
+        # --- per-point cex (used only for the pch="." dot size) ---
+        cex_raw = gp.get("cex", None) if gp else None
+        if isinstance(cex_raw, (list, tuple, np.ndarray)):
+            cex_arr = np.asarray(cex_raw, dtype=float)
+        elif cex_raw is not None:
+            cex_arr = np.full(n, float(cex_raw))
+        else:
+            cex_arr = np.full(n, 1.0)
+
         for i in range(n):
             cx = x[i]
             cy = y[i]
             r = size_arr[i] * scale if i < len(size_arr) else size * scale
             lwd_i = float(lwd_arr[i % len(lwd_arr)])
-            self._draw_pch_shape(
-                ctx, int(pch_arr[i]), cx, cy, r,
-                col_rgba=col_list[i],
-                fill_rgba=fill_list[i],
-                lwd=lwd_i,
-            )
+            pch_i = pch_arr[i]
+            if isinstance(pch_i, (str, bytes, np.str_)):
+                # Character pch.  R's engine takes only the FIRST
+                # character of the string for a per-point glyph.
+                ch = str(pch_i)
+                if ch == ".":
+                    # R's pch="." draws a tiny filled point (a small
+                    # engine-constant rect, scaled by cex).  Render a
+                    # tiny filled circle so it reads as a single pixel-
+                    # scale dot rather than the symbol-19 disc or a
+                    # full-size glyph.  ``r`` is the symbol radius; the
+                    # dot is a small fraction of it (matching R's "."
+                    # which is visually ~1px at default cex).
+                    self._draw_pch_dot(
+                        ctx, cx, cy, r, col_rgba=col_list[i],
+                        cex=float(cex_arr[i % len(cex_arr)]),
+                    )
+                else:
+                    self._draw_pch_glyph(
+                        ctx, ch[:1], cx, cy, r,
+                        col_rgba=col_list[i], gp=gp,
+                    )
+            else:
+                self._draw_pch_shape(
+                    ctx, int(pch_i), cx, cy, r,
+                    col_rgba=col_list[i],
+                    fill_rgba=fill_list[i],
+                    lwd=lwd_i,
+                )
 
         ctx.restore()
 
@@ -1559,6 +1684,18 @@ class CairoRenderer(GridRenderer):
         # Handle colour string arrays (e.g. from colourbar raster)
         # Convert colour strings to uint8 RGBA
         if img_array.dtype.kind in ("U", "S", "O"):
+            # A colour-string raster must be 2-D (rows × cols of colours).
+            # A 1-D vector here means an upstream bug fed a flat colour
+            # vector instead of a matrix.  Fail loud rather than silently
+            # coercing it to a 1-row strip (that would mask the caller's
+            # error and produce wrong output).
+            if img_array.ndim != 2:
+                ctx.restore()
+                raise ValueError(
+                    "raster image must be 2-D (got shape "
+                    f"{img_array.shape}); a colour-string raster needs "
+                    "rows × columns of colours, not a flat vector"
+                )
             h_img, w_img = img_array.shape[:2]
             rgba = np.zeros((h_img, w_img, 4), dtype=np.uint8)
             for r in range(h_img):
