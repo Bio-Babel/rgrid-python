@@ -824,7 +824,11 @@ class CairoRenderer(GridRenderer):
             if cex is not None:
                 cex_val = float(cex[0] if isinstance(cex, (list, tuple)) else cex)
 
+            # Gpar normalises `fontface` to the integer `font` code (R semantics,
+            # _gpar.py); honour either key so bold/italic are not dropped.
             face = gp.get("fontface", None)
+            if face is None:
+                face = gp.get("font", None)
             if face is not None:
                 val = face[0] if isinstance(face, (list, tuple)) else face
                 if isinstance(val, str):
