@@ -340,32 +340,38 @@ class GridRenderer(ABC):
 
         # --- Case 1: Layout viewport (no layout_pos) ---
         if layout is not None:
-            # Layout viewport uses same bounds as parent but stores grid info.
-            # Compute grid in device units for layout children.
-            w_dev = parent_vtr.width_cm / 2.54 * self._dev_units_per_inch
-            h_dev = parent_vtr.height_cm / 2.54 * self._dev_units_per_inch
-            # See R layout.c:492-590 — respect lives on the layout object;
-            # callers don't pass it down.
+            # R viewport.c:214-366: calcViewportTransform ALWAYS resolves the
+            # viewport's own x/y/width/height region first; only THEN does
+            # calcViewportLayout subdivide *that* region -- it is called with
+            # the viewport's own vpWidthCM/vpHeightCM (viewport.c:365), not the
+            # parent's. So a layout viewport that also carries an explicit
+            # position/size occupies that region and the layout applies within
+            # it. (Previously this branch cloned the parent transform, silently
+            # discarding the viewport's own inset.)
+            fontsize, cex, lineheight = self._gpar_font_params(None)
+            vtr = calc_viewport_transform(
+                vp,
+                parent_vtr.transform,
+                parent_vtr.width_cm,
+                parent_vtr.height_cm,
+                parent_vtr.rotation_angle,
+                parent_vtr.vpc,
+                gc_fontsize=fontsize,
+                gc_cex=cex,
+                gc_lineheight=lineheight,
+                str_metric_fn=self._str_metric_fn,
+                grob_metric_fn=self._grob_metric_fn,
+            )
+
+            # Compute the grid WITHIN the viewport's own bounds.
+            w_dev = vtr.width_cm / 2.54 * self._dev_units_per_inch
+            h_dev = vtr.height_cm / 2.54 * self._dev_units_per_inch
             grid_info = self._compute_grid(layout, w_dev, h_dev)
 
-            # The layout viewport itself has the same transform as parent
-            # but we create a new VTR with the vp's xscale/yscale
-            xscale = getattr(vp, "_xscale", [0.0, 1.0])
-            yscale = getattr(vp, "_yscale", [0.0, 1.0])
-            vtr = ViewportTransformResult(
-                width_cm=parent_vtr.width_cm,
-                height_cm=parent_vtr.height_cm,
-                rotation_angle=parent_vtr.rotation_angle,
-                transform=parent_vtr.transform.copy(),
-                vpc=ViewportContext(
-                    xscale=(float(xscale[0]), float(xscale[1])),
-                    yscale=(float(yscale[0]), float(yscale[1])),
-                ),
-            )
             self._vp_transform_stack.append(vtr)
             self._vp_obj_stack.append(vp)
+            self._do_apply_clip_vtr(vp, vtr)
             self._layout_stack.append(grid_info)
-            self._clip_stack.append(False)
             self._layout_depth_stack.append(len(self._vp_transform_stack))
             return
 
